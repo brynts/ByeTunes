@@ -1,0 +1,938 @@
+import Foundation
+import Darwin
+import Combine
+import UIKit
+import CommonCrypto
+
+// MARK: - Type Aliases
+typealias IdevicePairingFile = OpaquePointer
+typealias IdeviceProviderHandle = OpaquePointer
+typealias HeartbeatClientHandle = OpaquePointer
+typealias AfcClientHandle = OpaquePointer
+typealias AfcFileHandle = OpaquePointer
+typealias LockdowndClientHandle = OpaquePointer
+
+typealias IdeviceErrorCode = UnsafeMutablePointer<IdeviceFfiError>?
+
+let IdeviceSuccess: IdeviceErrorCode = nil
+
+class DeviceManager: ObservableObject {
+    @Published var heartbeatReady: Bool = false
+    var provider: IdeviceProviderHandle?
+    var heartbeatThread: Thread?
+    
+    static var shared = DeviceManager()
+    
+    var pairingFile: URL {
+        return URL.documentsDirectory.appendingPathComponent("pairingFile.plist")
+    }
+    
+    private init() {
+        print("[DeviceManager] Initializing...")
+        let logPath = URL.documentsDirectory.appendingPathComponent("idevice-logs.txt").path
+        let cString = strdup(logPath)
+        defer { free(cString) }
+        idevice_init_logger(Debug, Disabled, cString)
+    }
+
+    // MARK: - Heartbeat Connection
+    // Conectar el heartbeat pa que no se cierre la conexion
+    
+    func startHeartbeat(_ completion: @escaping (IdeviceErrorCode) -> Void) {
+        
+        DispatchQueue.main.async {
+            self.heartbeatReady = false
+        }
+        
+        heartbeatThread = Thread {
+            self.establishHeartbeat { err in
+                completion(err)
+            }
+        }
+        heartbeatThread?.name = "HeartbeatThread"
+        heartbeatThread?.start()
+    }
+
+    func establishHeartbeat(_ completion: @escaping (IdeviceErrorCode) -> Void) {
+        let pairingPath = pairingFile.path
+        
+        var addr = sockaddr_in()
+        memset(&addr, 0, MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = CFSwapInt16HostToBig(UInt16(LOCKDOWN_PORT))
+        inet_pton(AF_INET, "10.7.0.1", &addr.sin_addr)
+        
+        var pairingPtr: IdevicePairingFile?
+        let pairingErr = idevice_pairing_file_read(pairingFile.path, &pairingPtr)
+        
+        if let oldProvider = provider {
+            idevice_provider_free(oldProvider)
+            provider = nil
+        }
+        
+        let providerErr = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                idevice_tcp_provider_new(sockaddrPointer, pairingPtr, "Music-Provider", &provider)
+            }
+        }
+        
+        if provider == nil {
+            print("[DeviceManager] ERROR: Provider is nil, cannot continue. Err: \(String(describing: providerErr))")
+            completion(providerErr)
+            return
+        }
+        
+        var hbClient: HeartbeatClientHandle?
+        let err = heartbeat_connect(provider, &hbClient)
+        
+        if err == IdeviceSuccess && hbClient != nil {
+            print("[DeviceManager] Heartbeat connected successfully!")
+            completion(IdeviceSuccess)
+            
+            while true {
+                var newInterval: UInt64 = 0
+                heartbeat_get_marco(hbClient, 5, &newInterval)
+                heartbeat_send_polo(hbClient)
+                
+                DispatchQueue.main.async {
+                    if !self.heartbeatReady {
+                        print("[DeviceManager] Setting heartbeatReady to true")
+                    }
+                    self.heartbeatReady = true
+                }
+                
+                Thread.sleep(forTimeInterval: 5)
+            }
+        } else {
+            print("[DeviceManager] ERROR: Heartbeat connection failed")
+            completion(err)
+        }
+    }
+
+    // MARK: - Notification Proxy
+    // Mandar notis al device pa que sepa que ya acabamos
+    
+    func sendSyncFinishedNotification() {
+        var lockdownd: LockdowndClientHandle?
+        let err = lockdownd_connect(provider, &lockdownd)
+        
+        if err == IdeviceSuccess {
+            var port: UInt16 = 0
+            var ssl: Bool = false
+            _ = lockdownd_start_service(lockdownd, "com.apple.mobile.notification_proxy", &port, &ssl)
+            lockdownd_client_free(lockdownd)
+        }
+    }
+    
+    // MARK: - ATC Sync (Triggers Music Library Update)
+    // Disparar el sync de ATC (pa que actualice la library de musica)
+    
+    func triggerATCSync(completion: @escaping (Bool) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var lockdownd: LockdowndClientHandle?
+            let err = lockdownd_connect(self.provider, &lockdownd)
+            
+            guard err == IdeviceSuccess else {
+                print("[DeviceManager] Failed to connect lockdownd for ATC")
+                completion(false)
+                return
+            }
+            
+            var port: UInt16 = 0
+            var ssl: Bool = false
+            let svcErr = lockdownd_start_service(lockdownd, "com.apple.atc", &port, &ssl)
+            
+            lockdownd_client_free(lockdownd)
+            
+            if port > 0 {
+                // Note: Full ATC protocol implementation would require:
+                // 1. Connect to the ATC port via TCP
+                // 2. Wrap in SSL using the pairing certificates
+                // 3. Send ATC commands (little-endian length + plist)
+                // For now, just confirming we can start the service
+                completion(true)
+            } else {
+                print("[DeviceManager] Failed to get ATC port")
+                completion(false)
+            }
+        }
+    }
+    
+    // MARK: - AFC File Operations
+    // Operaciones de archivos AFC (subir/borrar cosas)
+
+    func addSongToDevice(localURL: URL, filename: String, completion: @escaping (Bool) -> Void) {
+        print("[DeviceManager] addSongToDevice called for: \(filename)")
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            var afc: AfcClientHandle?
+            var file: AfcFileHandle?
+            
+            let needsSecurityScope = localURL.startAccessingSecurityScopedResource()
+            print("[DeviceManager] Security scoped access needed: \(needsSecurityScope)")
+            defer {
+                if needsSecurityScope {
+                    localURL.stopAccessingSecurityScopedResource()
+                }
+            }
+            
+            print("[DeviceManager] File exists: \(FileManager.default.fileExists(atPath: localURL.path))")
+
+            print("[DeviceManager] Connecting AFC client...")
+            afc_client_connect(self.provider, &afc)
+            print("[DeviceManager] AFC client connected: \(afc != nil)")
+            
+            guard afc != nil else {
+                print("[DeviceManager] ERROR: AFC client is nil")
+                completion(false)
+                return
+            }
+            
+            // Ensure directory exists
+            let musicDir = "/iTunes_Control/Music/F00"
+            print("[DeviceManager] Creating directory: \(musicDir)")
+            afc_make_directory(afc, musicDir)
+            
+            let remotePath = "\(musicDir)/\(filename)"
+            print("[DeviceManager] Opening remote file: \(remotePath)")
+            afc_file_open(afc, remotePath, AfcWrOnly, &file)
+            
+            guard file != nil else {
+                print("[DeviceManager] ERROR: Could not open remote file")
+                afc_client_free(afc)
+                completion(false)
+                return
+            }
+            
+            if let data = try? Data(contentsOf: localURL) {
+                // print("[DeviceManager] Writing \(data.count) bytes...")
+                data.withUnsafeBytes { buffer in
+                    if let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                        afc_file_write(file, base, data.count)
+                    }
+                }
+                // print("[DeviceManager] Write complete")
+            } else {
+                print("[DeviceManager] ERROR: Could not read file data from \(localURL.path)")
+                afc_file_close(file)
+                afc_client_free(afc)
+                completion(false)
+                return
+            }
+            
+            afc_file_close(file)
+            afc_client_free(afc)
+            
+            self.sendSyncFinishedNotification()
+            print("[DeviceManager] addSongToDevice complete")
+            completion(true)
+        }
+    }
+    
+    // MARK: - File Deletion
+    
+    func removeFileFromDevice(remotePath: String, completion: @escaping (Bool) -> Void) {
+        print("[DeviceManager] removeFileFromDevice called for: \(remotePath)")
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            var afc: AfcClientHandle?
+            
+            afc_client_connect(self.provider, &afc)
+            
+            guard afc != nil else {
+                print("[DeviceManager] ERROR: AFC client is nil for deletion")
+                completion(false)
+                return
+            }
+            
+            
+            let err = afc_remove_path(afc, remotePath)
+            // print("[DeviceManager] Remove result for \(remotePath): \(err == nil ? "success" : "error")")
+            
+            afc_client_free(afc)
+            completion(err == nil)
+        }
+    }
+    
+    // MARK: - Library Reset
+    
+    func deleteMediaLibrary(completion: @escaping (Bool) -> Void) {
+        print("[DeviceManager] DELETING MEDIA LIBRARY...")
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            var afc: AfcClientHandle?
+            afc_client_connect(self.provider, &afc)
+            
+            guard afc != nil else {
+                print("[DeviceManager] ERROR: AFC client is nil for library reset")
+                completion(false)
+                return
+            }
+            
+            // Delete main DB and journals
+            let files = [
+                "/iTunes_Control/iTunes/MediaLibrary.sqlitedb",
+                "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal",
+                "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm"
+            ]
+            
+            for file in files {
+                afc_remove_path(afc, file)
+            }
+            
+            afc_client_free(afc)
+            self.sendSyncFinishedNotification()
+            print("[DeviceManager] Library deleted.")
+            completion(true)
+        }
+    }
+    
+    func downloadFileFromDevice(remotePath: String, localURL: URL, completion: @escaping (Bool) -> Void) {
+        self.downloadFileFromDevice(remotePath: remotePath) { data in
+            guard let data = data else {
+                completion(false)
+                return
+            }
+            do {
+                try data.write(to: localURL)
+                completion(true)
+            } catch {
+                print("[DeviceManager] Error writing downloaded file: \(error)")
+                completion(false)
+            }
+        }
+    }
+    
+    
+    func downloadFileFromDevice(remotePath: String, completion: @escaping (Data?) -> Void) {
+        print("[DeviceManager] downloadFileFromDevice called for: \(remotePath)")
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            var afc: AfcClientHandle?
+            var file: AfcFileHandle?
+            
+            afc_client_connect(self.provider, &afc)
+            
+            guard afc != nil else {
+                print("[DeviceManager] ERROR: AFC client is nil for download")
+                completion(nil)
+                return
+            }
+            
+            // Open file for reading
+            afc_file_open(afc, remotePath, AfcRdOnly, &file)
+            
+            guard file != nil else {
+                print("[DeviceManager] File does not exist or cannot be opened: \(remotePath)")
+                afc_client_free(afc)
+                completion(nil)
+                return
+            }
+            
+            // Read the file data
+            var dataPtr: UnsafeMutablePointer<UInt8>?
+            var length: Int = 0
+            
+            let err = afc_file_read(file, &dataPtr, &length)
+            
+            if err == nil, let dataPtr = dataPtr, length > 0 {
+                let data = Data(bytes: dataPtr, count: length)
+                print("[DeviceManager] Downloaded \(length) bytes from \(remotePath)")
+                afc_file_read_data_free(dataPtr, length)
+                afc_file_close(file)
+                afc_client_free(afc)
+                completion(data)
+            } else {
+                print("[DeviceManager] Failed to read file: \(remotePath)")
+                afc_file_close(file)
+                afc_client_free(afc)
+                completion(nil)
+            }
+        }
+    }
+    
+    // MARK: - Generic File Upload
+    
+    func uploadFileToDevice(localURL: URL, remotePath: String, completion: @escaping (Bool) -> Void) {
+        print("[DeviceManager] uploadFileToDevice called: \(localURL.lastPathComponent) -> \(remotePath)")
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            var afc: AfcClientHandle?
+            var file: AfcFileHandle?
+            
+            let needsSecurityScope = localURL.startAccessingSecurityScopedResource()
+            defer {
+                if needsSecurityScope {
+                    localURL.stopAccessingSecurityScopedResource()
+                }
+            }
+            
+            afc_client_connect(self.provider, &afc)
+            
+            guard afc != nil else {
+                print("[DeviceManager] ERROR: AFC client is nil")
+                completion(false)
+                return
+            }
+            
+            afc_file_open(afc, remotePath, AfcWrOnly, &file)
+            
+            guard file != nil else {
+                print("[DeviceManager] ERROR: Could not open remote file: \(remotePath)")
+                afc_client_free(afc)
+                completion(false)
+                return
+            }
+            
+            
+            if let data = try? Data(contentsOf: localURL) {
+                // print("[DeviceManager] Writing \(data.count) bytes to \(remotePath)...")
+                data.withUnsafeBytes { buffer in
+                    if let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                        afc_file_write(file, base, data.count)
+                    }
+                }
+                // print("[DeviceManager] Write complete")
+            } else {
+                print("[DeviceManager] ERROR: Could not read file data")
+                afc_file_close(file)
+                afc_client_free(afc)
+                completion(false)
+                return
+            }
+            
+            afc_file_close(file)
+            afc_client_free(afc)
+            completion(true)
+        }
+    }
+    
+    // MARK: - Full Injection Workflow (with merge support)
+    
+    func injectSongs(songs: [SongMetadata], progress: @escaping (String) -> Void, completion: @escaping (Bool) -> Void) {
+        print("[DeviceManager] injectSongs called with \(songs.count) songs")
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Step 1: Try to download existing database
+            progress("Checking for existing library...")
+            print("[DeviceManager] Step 1: Downloading existing database")
+            
+            let semaphoreDownload = DispatchSemaphore(value: 0)
+            var existingDbData: Data?
+            var walData: Data?
+            var shmData: Data?
+            
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { data in
+                existingDbData = data
+                semaphoreDownload.signal()
+            }
+            semaphoreDownload.wait()
+            
+            // Download WAL
+            let semWal = DispatchSemaphore(value: 0)
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal") { data in
+                walData = data
+                semWal.signal()
+            }
+            semWal.wait()
+            
+            // Download SHM
+            let semShm = DispatchSemaphore(value: 0)
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm") { data in
+                shmData = data
+                semShm.signal()
+            }
+            semShm.wait()
+            
+            // Step 2: Create/Connect AFC and setup directories
+            var afc: AfcClientHandle?
+            afc_client_connect(self.provider, &afc)
+            
+            guard afc != nil else {
+                print("[DeviceManager] ERROR: AFC client is nil")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            
+            // Delete WAL/SHM files (they can cause issues)
+            afc_remove_path(afc, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm")
+            afc_remove_path(afc, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal")
+            
+            // Create directories
+            afc_make_directory(afc, "/iTunes_Control/Music/F00")
+            afc_make_directory(afc, "/iTunes_Control/iTunes")
+            afc_make_directory(afc, "/iTunes_Control/Artwork")
+            
+            afc_client_free(afc)
+            
+            // Step 3: Create database (merge or fresh)
+            var dbURL: URL
+            var existingFiles = Set<String>()
+            
+            do {
+                // Check if existing database is valid (at least 10KB to cover header + schema)
+                if let existingData = existingDbData, existingData.count > 10000 {
+                    progress("Merging with existing library...")
+                    print("[DeviceManager] Step 3: Merging with existing database (\(existingData.count) bytes)")
+                    
+                    let result = try MediaLibraryBuilder.addSongsToExistingDatabase(
+                        existingDbData: existingData,
+                        walData: walData,
+                        shmData: shmData,
+                        newSongs: songs
+                    )
+                    dbURL = result.dbURL
+                    existingFiles = result.existingFiles
+                    
+                    print("[DeviceManager] Existing files on device: \(existingFiles.count)")
+                } else {
+                    if existingDbData != nil {
+                        print("[DeviceManager] Existing database too small (\(existingDbData!.count) bytes), creating fresh")
+                    }
+                    progress("Creating new library...")
+                    print("[DeviceManager] Step 3: Creating fresh database")
+                    dbURL = try MediaLibraryBuilder.createDatabase(with: songs)
+                }
+            } catch {
+                // If merge failed, try creating a fresh database instead
+                print("[DeviceManager] Merge failed: \(error), falling back to fresh database")
+                do {
+                    progress("Creating new library...")
+                    dbURL = try MediaLibraryBuilder.createDatabase(with: songs)
+                } catch {
+                    print("[DeviceManager] ERROR: Failed to create database: \(error)")
+                    DispatchQueue.main.async { completion(false) }
+                    return
+                }
+            }
+            
+            // Step 4: Upload MP3 files (skip existing ones)
+            progress("Uploading songs...")
+            print("[DeviceManager] Step 4: Uploading MP3 files")
+            
+            var uploadedCount = 0
+            var skippedCount = 0
+            
+            for (index, song) in songs.enumerated() {
+                // Skip if file already exists on device
+                if existingFiles.contains(song.remoteFilename) {
+                    print("[DeviceManager] Skipping (already exists): \(song.title)")
+                    skippedCount += 1
+                    continue
+                }
+                
+                progress("Uploading \(index + 1)/\(songs.count): \(song.title)")
+                // print("[DeviceManager] Uploading: \(song.title) -> \(song.remoteFilename)")
+                
+                let semaphore = DispatchSemaphore(value: 0)
+                var uploadSuccess = false
+                
+                let remotePath = "/iTunes_Control/Music/F00/\(song.remoteFilename)"
+                self.uploadFileToDevice(localURL: song.localURL, remotePath: remotePath) { success in
+                    uploadSuccess = success
+                    semaphore.signal()
+                }
+                
+                semaphore.wait()
+                
+                if !uploadSuccess {
+                    print("[DeviceManager] ERROR: Failed to upload \(song.title)")
+                    DispatchQueue.main.async { completion(false) }
+                    return
+                }
+                
+                uploadedCount += 1
+                
+                // Upload artwork to iOS artwork cache path
+                // Format: /iTunes_Control/iTunes/Artwork/Originals/XX/rest_of_sha1 (no extension)
+                if let artworkData = song.artworkData {
+                    // Compute SHA1 hash of artwork data
+                    var sha1Hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
+                    artworkData.withUnsafeBytes { bytes in
+                        _ = CC_SHA1(bytes.baseAddress, CC_LONG(artworkData.count), &sha1Hash)
+                    }
+                    let hashString = sha1Hash.map { String(format: "%02x", $0) }.joined()
+                    
+                    // Path format: XX/rest (first 2 chars as folder)
+                    let folderName = String(hashString.prefix(2))
+                    let fileName = String(hashString.dropFirst(2))
+                    
+                    // Create directory structure and upload
+                    let artworkDir = "/iTunes_Control/iTunes/Artwork/Originals/\(folderName)"
+                    let artworkPath = "\(artworkDir)/\(fileName)"
+                    
+                    print("[DeviceManager] Uploading artwork for: \(song.title) -> \(artworkPath)")
+                    
+                    // Create directory
+                    var afcArt: AfcClientHandle?
+                    afc_client_connect(self.provider, &afcArt)
+                    if afcArt != nil {
+                        // Create Originals directory
+                        afc_make_directory(afcArt, "/iTunes_Control/iTunes/Artwork")
+                        afc_make_directory(afcArt, "/iTunes_Control/iTunes/Artwork/Originals")
+                        afc_make_directory(afcArt, artworkDir)
+                        
+                        // Create Caches directories for all sizes found in 3uTools
+                        let cacheSizes = ["480x480", "531x531", "556x556", "390x390", "144x144"]
+                        
+                        afc_make_directory(afcArt, "/iTunes_Control/iTunes/Artwork/Caches")
+                        for size in cacheSizes {
+                            afc_make_directory(afcArt, "/iTunes_Control/iTunes/Artwork/Caches/\(size)")
+                            afc_make_directory(afcArt, "/iTunes_Control/iTunes/Artwork/Caches/\(size)/\(folderName)")
+                        }
+                        afc_client_free(afcArt)
+                    }
+                    
+                    // Save artwork to temp file (no extension, as iOS expects)
+                    let tempArtwork = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+                    try? artworkData.write(to: tempArtwork)
+                    
+                    // Upload to Originals
+                    let artworkSem = DispatchSemaphore(value: 0)
+                    self.uploadFileToDevice(localURL: tempArtwork, remotePath: artworkPath) { _ in
+                        artworkSem.signal()
+                    }
+                    artworkSem.wait()
+                    
+                    // Upload to ALL Cache sizes (mimic 3uTools structure)
+                    let cacheSizes = ["480x480", "531x531", "556x556", "390x390", "144x144"]
+                    for size in cacheSizes {
+                        let cachePath = "/iTunes_Control/iTunes/Artwork/Caches/\(size)/\(folderName)/\(fileName)"
+                        let cacheSem = DispatchSemaphore(value: 0)
+                        self.uploadFileToDevice(localURL: tempArtwork, remotePath: cachePath) { _ in
+                            cacheSem.signal()
+                        }
+                        cacheSem.wait()
+                    }
+                    
+                    print("[DeviceManager] Uploaded artwork to Originals and \(cacheSizes.count) cache folders")
+                    
+                    try? FileManager.default.removeItem(at: tempArtwork)
+                    
+                    // Store hash for DB reference
+                    print("[DeviceManager] Artwork hash: \(folderName)/\(fileName)")
+                }
+            }
+            
+            print("[DeviceManager] Uploaded: \(uploadedCount), Skipped: \(skippedCount)")
+            
+            // Step 4.5: Generate and upload ArtworkDB binary file
+            progress("Generating ArtworkDB...")
+            print("[DeviceManager] Step 4.5: Generating ArtworkDB")
+            
+            // Build artwork entries for ArtworkDB - we need item_pids from songs with artwork
+            // For now, generate an empty skeleton (the binary format requires specific structure)
+            let artworkDBData = ArtworkDBBuilder.generateEmptyArtworkDB()
+            let artworkDBPath = FileManager.default.temporaryDirectory.appendingPathComponent("ArtworkDB")
+            try? artworkDBData.write(to: artworkDBPath)
+            
+            let semArtworkDB = DispatchSemaphore(value: 0)
+            self.uploadFileToDevice(localURL: artworkDBPath, remotePath: "/iTunes_Control/Artwork/ArtworkDB") { _ in
+                semArtworkDB.signal()
+            }
+            semArtworkDB.wait()
+            try? FileManager.default.removeItem(at: artworkDBPath)
+            print("[DeviceManager] ArtworkDB uploaded")
+
+            
+            // Step 5: Upload merged database
+            progress("Uploading database...")
+            print("[DeviceManager] Step 5: Uploading database")
+            
+            // First delete the old database
+            var afcDel: AfcClientHandle?
+            afc_client_connect(self.provider, &afcDel)
+            if afcDel != nil {
+                afc_remove_path(afcDel, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb")
+                afc_client_free(afcDel)
+            }
+            
+            let semaphoreUploadDb = DispatchSemaphore(value: 0)
+            var dbUploadSuccess = false
+            
+            self.uploadFileToDevice(localURL: dbURL, remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { success in
+                dbUploadSuccess = success
+                semaphoreUploadDb.signal()
+            }
+            
+            semaphoreUploadDb.wait()
+            
+            if !dbUploadSuccess {
+                print("[DeviceManager] ERROR: Failed to upload database")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            
+            // Cleanup temp file
+            try? FileManager.default.removeItem(at: dbURL)
+            
+            // Step 6: Send sync notification
+            progress("Finalizing...")
+            print("[DeviceManager] Step 6: Sending sync notification")
+            self.sendSyncFinishedNotification()
+            
+            progress("Complete! Restart your iPhone.")
+            print("[DeviceManager] Injection complete!")
+            DispatchQueue.main.async { completion(true) }
+        }
+    }
+    
+    // MARK: - Playlist Injection
+    
+    /// Inject songs and create a playlist containing them
+    func injectSongsAsPlaylist(songs: [SongMetadata], playlistName: String? = nil, targetPlaylistPid: Int64? = nil, progress: @escaping (String) -> Void, completion: @escaping (Bool) -> Void) {
+        print("[DeviceManager] injectSongsAsPlaylist called with \(songs.count) songs, playlist: '\(playlistName ?? "Existing")'")
+        
+        let tempDir = FileManager.default.temporaryDirectory
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            // Step 1: Try to download existing database
+            progress("Checking for existing library...")
+            
+            let semaphoreDownload = DispatchSemaphore(value: 0)
+            var existingDbData: Data?
+            var walData: Data?
+            var shmData: Data?
+            
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb", localURL: tempDir.appendingPathComponent("temp_lib.sqlitedb")) { success in
+                if success {
+                    existingDbData = try? Data(contentsOf: tempDir.appendingPathComponent("temp_lib.sqlitedb"))
+                }
+                semaphoreDownload.signal()
+            }
+            semaphoreDownload.wait()
+            
+            // Download WAL
+            let semWal = DispatchSemaphore(value: 0)
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal") { data in
+                walData = data
+                semWal.signal()
+            }
+            semWal.wait()
+            
+            // Download SHM
+            let semShm = DispatchSemaphore(value: 0)
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm") { data in
+                shmData = data
+                semShm.signal()
+            }
+            semShm.wait()
+            
+            // Step 2: Create/Connect AFC and setup directories
+            var afc: AfcClientHandle?
+            afc_client_connect(self.provider, &afc)
+            
+            guard afc != nil else {
+                print("[DeviceManager] ERROR: AFC client is nil")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            
+            afc_remove_path(afc, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm")
+            afc_remove_path(afc, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal")
+            afc_make_directory(afc, "/iTunes_Control/Music/F00")
+            afc_make_directory(afc, "/iTunes_Control/iTunes")
+            afc_make_directory(afc, "/iTunes_Control/Artwork")
+            afc_client_free(afc)
+            
+            // Step 3: Create database with playlist
+            var dbURL: URL
+            var existingFiles = Set<String>()
+            
+            do {
+                if let existingData = existingDbData, existingData.count > 10000 {
+                    progress("Merging with existing library...")
+                    let result = try MediaLibraryBuilder.addSongsToExistingDatabase(
+                        existingDbData: existingData,
+                        walData: walData,
+                        shmData: shmData,
+                        newSongs: songs,
+                        playlistName: playlistName,
+                        targetPlaylistPid: targetPlaylistPid
+                    )
+                    dbURL = result.dbURL
+                    existingFiles = result.existingFiles
+                } else {
+                    progress("Creating new library with playlist...")
+                    dbURL = try MediaLibraryBuilder.createDatabase(with: songs, playlistName: playlistName)
+                }
+            } catch {
+                print("[DeviceManager] Database creation failed: \(error)")
+                do {
+                    progress("Creating new library with playlist...")
+                    dbURL = try MediaLibraryBuilder.createDatabase(with: songs, playlistName: playlistName)
+                } catch {
+                    print("[DeviceManager] ERROR: Failed to create database: \(error)")
+                    DispatchQueue.main.async { completion(false) }
+                    return
+                }
+            }
+            
+            // Step 4: Upload MP3 files (same as regular inject)
+            progress("Uploading songs...")
+            
+            for (index, song) in songs.enumerated() {
+                if existingFiles.contains(song.remoteFilename) {
+                    continue
+                }
+                
+                progress("Uploading \(index + 1)/\(songs.count): \(song.title)")
+                
+                let semaphore = DispatchSemaphore(value: 0)
+                var uploadSuccess = false
+                
+                let remotePath = "/iTunes_Control/Music/F00/\(song.remoteFilename)"
+                self.uploadFileToDevice(localURL: song.localURL, remotePath: remotePath) { success in
+                    uploadSuccess = success
+                    semaphore.signal()
+                }
+                
+                semaphore.wait()
+                
+                if !uploadSuccess {
+                    print("[DeviceManager] ERROR: Failed to upload \(song.title)")
+                    DispatchQueue.main.async { completion(false) }
+                    return
+                }
+                
+                // Upload artwork
+                if let artworkData = song.artworkData {
+                    var sha1Hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
+                    artworkData.withUnsafeBytes { bytes in
+                        _ = CC_SHA1(bytes.baseAddress, CC_LONG(artworkData.count), &sha1Hash)
+                    }
+                    let hashString = sha1Hash.map { String(format: "%02x", $0) }.joined()
+                    let folderName = String(hashString.prefix(2))
+                    let fileName = String(hashString.dropFirst(2))
+                    
+                    let artworkDir = "/iTunes_Control/iTunes/Artwork/Originals/\(folderName)"
+                    let artworkPath = "\(artworkDir)/\(fileName)"
+                    
+                    var afcArt: AfcClientHandle?
+                    afc_client_connect(self.provider, &afcArt)
+                    if afcArt != nil {
+                        afc_make_directory(afcArt, "/iTunes_Control/iTunes/Artwork")
+                        afc_make_directory(afcArt, "/iTunes_Control/iTunes/Artwork/Originals")
+                        afc_make_directory(afcArt, artworkDir)
+                        afc_client_free(afcArt)
+                    }
+                    
+                    let tempArtwork = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+                    try? artworkData.write(to: tempArtwork)
+                    
+                    let artworkSem = DispatchSemaphore(value: 0)
+                    self.uploadFileToDevice(localURL: tempArtwork, remotePath: artworkPath) { _ in
+                        artworkSem.signal()
+                    }
+                    artworkSem.wait()
+                    try? FileManager.default.removeItem(at: tempArtwork)
+                }
+            }
+            
+            // Step 5: Upload database
+            progress("Uploading database...")
+            
+            var afcDel: AfcClientHandle?
+            afc_client_connect(self.provider, &afcDel)
+            if afcDel != nil {
+                afc_remove_path(afcDel, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb")
+                afc_client_free(afcDel)
+            }
+            
+            let semaphoreUploadDb = DispatchSemaphore(value: 0)
+            var dbUploadSuccess = false
+            
+            self.uploadFileToDevice(localURL: dbURL, remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { success in
+                dbUploadSuccess = success
+                semaphoreUploadDb.signal()
+            }
+            
+            semaphoreUploadDb.wait()
+            
+            if !dbUploadSuccess {
+                print("[DeviceManager] ERROR: Failed to upload database")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            
+            try? FileManager.default.removeItem(at: dbURL)
+            
+            // Step 6: Send notification
+            progress("Finalizing...")
+            self.sendSyncFinishedNotification()
+            
+            progress("Playlist '\(playlistName ?? "Unknown")' updated!")
+            print("[DeviceManager] Playlist injection complete!")
+            DispatchQueue.main.async { completion(true) }
+        }
+    }
+    
+    func fetchPlaylists(completion: @escaping ([(name: String, pid: Int64)]) -> Void) {
+        let dbPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self, self.heartbeatReady else {
+                DispatchQueue.main.async { completion([]) }
+                return
+            }
+            
+            // Download DB to temp
+            let tempDir = FileManager.default.temporaryDirectory
+            let localURL = tempDir.appendingPathComponent("PlaylistFetch.sqlitedb")
+            let walURL = tempDir.appendingPathComponent("PlaylistFetch.sqlitedb-wal")
+            let shmURL = tempDir.appendingPathComponent("PlaylistFetch.sqlitedb-shm")
+            
+            try? FileManager.default.removeItem(at: localURL)
+            try? FileManager.default.removeItem(at: walURL)
+            try? FileManager.default.removeItem(at: shmURL)
+            
+            let sem = DispatchSemaphore(value: 0)
+            var success = false
+            
+            // Download Main
+            self.downloadFileFromDevice(remotePath: dbPath, localURL: localURL) { isSuccess in
+                success = isSuccess
+                sem.signal()
+            }
+            sem.wait()
+            
+            if !success {
+                print("[DeviceManager] Failed to download DB for playlist fetch")
+                DispatchQueue.main.async { completion([]) }
+                return
+            }
+            
+            // Download WAL
+            let semWal = DispatchSemaphore(value: 0)
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal", localURL: walURL) { _ in
+                semWal.signal()
+            }
+            semWal.wait()
+            
+            // Download SHM
+            let semShm = DispatchSemaphore(value: 0)
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm", localURL: shmURL) { _ in
+                semShm.signal()
+            }
+            semShm.wait()
+            
+            // Open and query
+            let playlists = MediaLibraryBuilder.extractPlaylists(fromDbPath: localURL.path)
+            
+            try? FileManager.default.removeItem(at: localURL)
+            try? FileManager.default.removeItem(at: walURL)
+            try? FileManager.default.removeItem(at: shmURL)
+            
+            DispatchQueue.main.async { completion(playlists) }
+        }
+    }
+}
+
+// MARK: - URL Extension
+extension URL {
+    static var documentsDirectory: URL {
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+    }
+}

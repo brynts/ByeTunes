@@ -1,10 +1,3 @@
-//
-//  MusicManagerApp.swift
-//  MusicManager
-//
-//  Created by Eduardo Flamenco on 1/6/26.
-//
-
 import SwiftUI
 
 @main
