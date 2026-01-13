@@ -8,8 +8,14 @@ struct SettingsView: View {
     @State private var showingPairingPicker = false
     @State private var showingDeleteAlert = false
     
+    // Toast State
+    @State private var showToast = false
+    @State private var toastTitle = ""
+    @State private var toastIcon = ""
+    
     var body: some View {
-        ScrollView {
+        ZStack(alignment: .bottom) {
+            ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 // Header
                 Text("Settings")
@@ -39,7 +45,7 @@ struct SettingsView: View {
                                     Text("Pairing File")
                                         .font(.body)
                                         .foregroundColor(.primary)
-                                    Text(manager.heartbeatReady ? "Connected" : "Not connected")
+                                    Text(manager.connectionStatus)
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
@@ -72,9 +78,24 @@ struct SettingsView: View {
                                 Circle()
                                     .fill(manager.heartbeatReady ? Color.green : Color.red)
                                     .frame(width: 8, height: 8)
-                                Text(manager.heartbeatReady ? "Online" : "Offline")
+                                Text(manager.connectionStatus)
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
+                                
+                                if !manager.heartbeatReady {
+                                    Button {
+                                        manager.startHeartbeat()
+                                    } label: {
+                                        Text("Retry")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 6)
+                                            .background(Color.accentColor)
+                                            .clipShape(Capsule())
+                                    }
+                                    .padding(.leading, 8)
+                                }
                             }
                         }
                         .padding(.vertical, 14)
@@ -144,6 +165,103 @@ struct SettingsView: View {
                 }
 
                 
+                // Help & Support
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("HELP & SUPPORT")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .tracking(0.5)
+                    
+                    VStack(spacing: 0) {
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("1. Ensure you are connected to your Local Tunnel VPN (e.g., StosVPN, LocalDev VPN).")
+                                Text("2. If connected after opening the app, press 'Retry' next to the 'Connecting' status.")
+                                Text("3. Go to the Music tab.")
+                                Text("4. Tap 'Add Songs' to select your audio files.")
+                                Text("5. Tap 'Inject to Device' to sync them to your library.")
+                            }
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 8)
+                        } label: {
+                            HStack {
+                                Image(systemName: "questionmark.circle.fill")
+                                    .foregroundColor(.blue)
+                                Text("How to Use")
+                                    .foregroundColor(.primary)
+                            }
+                        }
+                        .padding()
+                        
+                        Divider().padding(.leading)
+                        
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("• App Stuck on White/Black Screen?")
+                                Text("  Restart your iPhone to force a library reload.")
+                                Text("• Songs Not Showing Up?")
+                                Text("  The songs likely didn't import correctly. Restart this app and try again.")
+                            }
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 8)
+                        } label: {
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.orange)
+                                Text("App Crashing / No Songs?")
+                                    .foregroundColor(.primary)
+                            }
+                        }
+                        .padding()
+                    }
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color(.systemGray5), lineWidth: 1)
+                    )
+                }
+                
+                // Credits
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("CREDITS")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .tracking(0.5)
+                    
+                    VStack(spacing: 0) {
+                        HStack {
+                            Image(systemName: "person.fill")
+                                .font(.body)
+                                .foregroundColor(.primary)
+                                .frame(width: 28)
+                            
+                            Text("Developer")
+                                .font(.body)
+                            
+                            Spacer()
+                            
+                            Text("EduAlexxis")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+                    }
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color(.systemGray5), lineWidth: 1)
+                    )
+                }
+                
                 // Danger Zone
                 VStack(alignment: .leading, spacing: 12) {
                     Text("DANGER ZONE")
@@ -193,12 +311,60 @@ struct SettingsView: View {
                 status = "Deleting library..."
                 manager.deleteMediaLibrary { success in
                     DispatchQueue.main.async {
-                        status = success ? "Library deleted. Restart Music app." : "Deletion failed"
+                        if success {
+                           self.showToast(title: "Library Deleted", icon: "trash.circle.fill")
+                        } else {
+                           self.showToast(title: "Deletion Failed", icon: "exclamationmark.triangle.fill")
+                        }
                     }
                 }
             }
         } message: {
             Text("This will permanently delete your Music library database and playlists from the device. This action cannot be undone.")
+        }
+    }
+    
+        // Toast Overlay
+        if showToast {
+            HStack(spacing: 12) {
+                Image(systemName: toastIcon)
+                    .font(.system(size: 24))
+                    .foregroundColor(.secondary)
+                
+                Text(toastTitle)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(.primary)
+                
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 100)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .zIndex(100)
+        }
+    }
+
+    
+
+    private func showToast(title: String, icon: String) {
+        withAnimation(.spring()) {
+            self.toastTitle = title
+            self.toastIcon = icon
+            self.showToast = true
+        }
+        
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            withAnimation(.easeOut(duration: 0.5)) {
+                self.showToast = false
+            }
         }
     }
     
@@ -220,17 +386,10 @@ struct SettingsView: View {
             }
             try FileManager.default.copyItem(at: url, to: destination)
             
-            status = "Connecting..."
+            status = "Pairing file imported"
             
-            manager.startHeartbeat { err in
-                DispatchQueue.main.async {
-                    if err == IdeviceSuccess {
-                        self.status = "Connected!"
-                    } else {
-                        self.status = "Connection failed"
-                    }
-                }
-            }
+            // Just start heartbeat - it handles retries
+            manager.startHeartbeat()
         } catch {
             status = "Import failed"
         }

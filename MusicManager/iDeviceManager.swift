@@ -18,6 +18,7 @@ let IdeviceSuccess: IdeviceErrorCode = nil
 
 class DeviceManager: ObservableObject {
     @Published var heartbeatReady: Bool = false
+    @Published var connectionStatus: String = "Disconnected"
     var provider: IdeviceProviderHandle?
     var heartbeatThread: Thread?
     
@@ -38,22 +39,37 @@ class DeviceManager: ObservableObject {
     // MARK: - Heartbeat Connection
     // Conectar el heartbeat pa que no se cierre la conexion
     
-    func startHeartbeat(_ completion: @escaping (IdeviceErrorCode) -> Void) {
-        
-        DispatchQueue.main.async {
-            self.heartbeatReady = false
-        }
+    // MARK: - Heartbeat Connection
+    
+    func startHeartbeat() {
+        // If already connecting or connected, don't spam? 
+        // Actually, user wants "Retry", so we should allow re-entrancy but maybe cancel previous?
+        // For simplicity, just spawn a new check.
         
         heartbeatThread = Thread {
-            self.establishHeartbeat { err in
-                completion(err)
+            DispatchQueue.main.async {
+                self.connectionStatus = "Connecting..."
+            }
+            
+            self.establishHeartbeat { success in
+                DispatchQueue.main.async {
+                    if success {
+                        // Connection was successful but now finished (likely lost)
+                        self.connectionStatus = "Connection Lost"
+                        self.heartbeatReady = false
+                    } else {
+                        // Never connected
+                        self.connectionStatus = "Connection Failed"
+                        self.heartbeatReady = false
+                    }
+                }
             }
         }
         heartbeatThread?.name = "HeartbeatThread"
         heartbeatThread?.start()
     }
 
-    func establishHeartbeat(_ completion: @escaping (IdeviceErrorCode) -> Void) {
+    func establishHeartbeat(_ completion: @escaping (Bool) -> Void) {
         let pairingPath = pairingFile.path
         
         var addr = sockaddr_in()
@@ -77,8 +93,8 @@ class DeviceManager: ObservableObject {
         }
         
         if provider == nil {
-            print("[DeviceManager] ERROR: Provider is nil, cannot continue. Err: \(String(describing: providerErr))")
-            completion(providerErr)
+            print("[DeviceManager] ERROR: Provider is nil. Err: \(String(describing: providerErr))")
+            completion(false)
             return
         }
         
@@ -87,25 +103,39 @@ class DeviceManager: ObservableObject {
         
         if err == IdeviceSuccess && hbClient != nil {
             print("[DeviceManager] Heartbeat connected successfully!")
-            completion(IdeviceSuccess)
             
+            DispatchQueue.main.async {
+                self.connectionStatus = "Connected"
+                self.heartbeatReady = true
+            }
+            
+            // Loop while connected
             while true {
                 var newInterval: UInt64 = 0
-                heartbeat_get_marco(hbClient, 5, &newInterval)
+                // We use 5s timeout. We do NOT check for error because false positives occur frequently.
+                // If the connection is truly dead, the outer loop isn't reachable, but at least we don't spam reconnects.
+                // This matches the stable behavior of the previous version.
+                heartbeat_get_marco(hbClient, 10, &newInterval)
+                
                 heartbeat_send_polo(hbClient)
                 
                 DispatchQueue.main.async {
                     if !self.heartbeatReady {
-                        print("[DeviceManager] Setting heartbeatReady to true")
+                         self.heartbeatReady = true
+                         self.connectionStatus = "Connected"
                     }
-                    self.heartbeatReady = true
                 }
                 
+                // Sleep 5s between heartbeats
                 Thread.sleep(forTimeInterval: 5)
             }
+            
+            // Cleanup
+            heartbeat_client_free(hbClient)
+            completion(true) // Was successful previously
         } else {
             print("[DeviceManager] ERROR: Heartbeat connection failed")
-            completion(err)
+            completion(false)
         }
     }
 

@@ -45,7 +45,7 @@ struct ContentView: View {
                     .padding(.bottom, 80)
                     
                     FloatingTabBar(selectedTab: $selectedTab)
-                        .padding(.bottom, 20)
+                        .padding(.bottom, 0)
                 }
                 .ignoresSafeArea(.keyboard)
                 .transition(.asymmetric(
@@ -73,16 +73,7 @@ struct ContentView: View {
             // Check if pairing file already exists
             if FileManager.default.fileExists(atPath: manager.pairingFile.path) {
                 hasCompletedOnboarding = true
-                status = "Found pairing file, connecting..."
-                manager.startHeartbeat { err in
-                    DispatchQueue.main.async {
-                        if err == IdeviceSuccess {
-                            self.status = "Connected!"
-                        } else {
-                            self.status = "Connection failed"
-                        }
-                    }
-                }
+                manager.startHeartbeat()
             }
         }
     }

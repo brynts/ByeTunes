@@ -21,6 +21,12 @@ struct MusicView: View {
     @State private var existingPlaylists: [PlaylistModel] = []
     @State private var isFetchingPlaylists = false
     
+    // Toast State
+    @State private var showToast = false
+    @State private var toastTitle = ""
+    @State private var toastIcon = ""
+
+    
     static var supportedAudioTypes: [UTType] {
         var types: [UTType] = [.mp3, .wav, .aiff, .mpeg4Audio, .audio]
         if let flac = UTType(filenameExtension: "flac") { types.append(flac) }
@@ -29,10 +35,11 @@ struct MusicView: View {
     }
     
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+        ZStack(alignment: .bottom) {
+            // ScrollView removed to disable page scrolling
+            VStack(alignment: .leading, spacing: 10) {
                 // Header
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 10) {
                         Text("Music")
                             .font(.system(size: 34, weight: .bold))
@@ -40,10 +47,10 @@ struct MusicView: View {
                         // Connection indicator
                         HStack(spacing: 6) {
                             Circle()
-                                .fill(manager.heartbeatReady ? Color.green : Color.red.opacity(0.8))
+                                .fill(manager.heartbeatReady ? Color.green : Color.red)
                                 .frame(width: 8, height: 8)
-                            Text(manager.heartbeatReady ? "Connected" : "Disconnected")
-                                .font(.caption)
+                            Text(manager.connectionStatus)
+                                .font(.subheadline)
                                 .foregroundColor(.secondary)
                         }
                         .padding(.horizontal, 10)
@@ -52,7 +59,7 @@ struct MusicView: View {
                         .clipShape(Capsule())
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, 0)
                 
                 // Quick Actions
                 VStack(spacing: 12) {
@@ -139,7 +146,7 @@ struct MusicView: View {
                         }
                         .foregroundColor(.black)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
+                        .padding(.vertical, 16)
                         .background(Color(.systemGray6))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
@@ -147,6 +154,28 @@ struct MusicView: View {
                     .opacity(songs.isEmpty ? 0.5 : 1)
                 }
                 
+                // Persistent Warning when queue is not empty - Placed here to be always visible
+                if !songs.isEmpty && !isInjecting {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text("IMPORTANT: Ensure Music App is closed before injecting")
+                            .fontWeight(.medium)
+                            .foregroundColor(.orange)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.1))
+                    .cornerRadius(12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+                    )
+                }
+
                 // Songs List
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
@@ -182,22 +211,25 @@ struct MusicView: View {
                         .padding(.vertical, 60)
                     } else {
                         // Song list
-                        LazyVStack(spacing: 0) {
-                            ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
-                                VStack(spacing: 0) {
-                                    SongRowView(song: song) {
-                                        withAnimation(.easeOut(duration: 0.2)) {
-                                            songs.removeAll { $0.id == song.id }
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
+                                    VStack(spacing: 0) {
+                                        SongRowView(song: song) {
+                                            withAnimation(.easeOut(duration: 0.2)) {
+                                                songs.removeAll { $0.id == song.id }
+                                            }
                                         }
-                                    }
-                                    
-                                    if index < songs.count - 1 {
-                                        Divider()
-                                            .padding(.leading, 68)
+                                        
+                                        if index < songs.count - 1 {
+                                            Divider()
+                                                .padding(.leading, 68)
+                                        }
                                     }
                                 }
                             }
                         }
+                        .frame(maxHeight: .infinity) // Fill remaining space compacted layout provides
                         .background(Color(.systemBackground))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .overlay(
@@ -207,18 +239,50 @@ struct MusicView: View {
                     }
                 }
                 
+
                 // Status message (only show action-related status, not connection status)
-                if !status.isEmpty && status != "Ready" && status != "Connected!" && status != "Connection failed" {
+                if !status.isEmpty && status != "Ready" && status != "Connected!" && status != "Connection failed" && status != "⚠️ IMPORTANT: Ensure Music App is closed!" {
                     Text(status)
                         .font(.footnote)
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.top, 8)
                 }
+                // Removed extra brace here
+                
+                Spacer() // Push content to top
             }
+            .padding(.bottom, 40) // Padding inside content, not frame
             .padding(.horizontal, 20)
-            .padding(.bottom, 100)
+            // Removed frame-constraining padding from here
+
+        
+        // Toast Overlay
+        if showToast {
+            HStack(spacing: 12) {
+                Image(systemName: toastIcon)
+                    .font(.system(size: 24))
+                    .foregroundColor(.secondary)
+                
+                Text(toastTitle)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(.primary)
+                
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 100) // Position above nav bar
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .zIndex(100)
         }
+    } // Close ZStack here
+    // Brace removed to continue modifier chain
+
         .background(Color(.systemGroupedBackground))
         .sheet(isPresented: $showingMusicPicker) {
             DocumentPicker(types: Self.supportedAudioTypes, allowsMultiple: true) { urls in
@@ -412,17 +476,40 @@ struct MusicView: View {
                     self.injectProgress = 0
                     
                     if success {
-                        self.status = "Injection complete! Please restart your Music app."
+                        // success
+                        self.showToast(title: "Injection Complete", icon: "checkmark.circle.fill")
                         withAnimation {
                             self.songs.removeAll()
                         }
                     } else {
-                        self.status = "Injection failed"
+                        self.showToast(title: "Injection Failed", icon: "xmark.circle.fill")
                     }
                 }
             }
         }
+
+    
     }
+
+    private func showToast(title: String, icon: String) {
+        withAnimation(.spring()) {
+            self.toastTitle = title
+            self.toastIcon = icon
+            self.showToast = true
+        }
+        
+        // Haptic feedback
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+        
+        // Auto hide
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            withAnimation(.easeOut(duration: 0.5)) {
+                self.showToast = false
+            }
+        }
+    }
+
     
     func injectAsPlaylist(name: String? = nil, pid: Int64? = nil) {
         guard !songs.isEmpty else { return }
@@ -431,7 +518,7 @@ struct MusicView: View {
         isInjecting = true
         injectProgress = 0
         let displayParams = name ?? "Existing Playlist"
-        // status = "Updating playlist '\(displayParams)'..."
+        // status = "Updating playlist..."
         
         let progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             if self.injectProgress < 0.9 {
@@ -457,12 +544,12 @@ struct MusicView: View {
                     
                     if success {
                         let finalName = name ?? "Selected"
-                        self.status = "Playlist '\(finalName)' updated! Restart your Music app."
+                        self.showToast(title: "Playlist Updated", icon: "checkmark.circle.fill")
                         withAnimation {
                             self.songs.removeAll()
                         }
                     } else {
-                        self.status = "Playlist creation failed"
+                        self.showToast(title: "Playlist Failed", icon: "xmark.circle.fill")
                     }
                 }
             }

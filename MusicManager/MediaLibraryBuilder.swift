@@ -450,7 +450,7 @@ class MediaLibraryBuilder {
                     location_kind_id
                 ) VALUES (
                     \(itemPid), '\(escapedTitle)', '\(escapedTitle)', 1, 1, \(song.durationMs), \(song.year),
-                    '\(escapedFilename)', \(song.fileSize), NULL, 0, \(now),
+                    '\(escapedFilename)', \(song.fileSize), \(MediaLibraryBuilder.generateIntegrityHex(filename: song.remoteFilename)), 0, \(now),
                     1, 0, 0, 0, 0, 0,
                     42
                 )
@@ -491,11 +491,96 @@ class MediaLibraryBuilder {
             // INSERT into chapter
             try executeSQL(db, "INSERT INTO chapter (item_pid) VALUES (\(itemPid))")
             
-            // ARTWORK DATABASE DISABLED - causes Queue crash and loses metadata
-            // The artwork file still uploads, but without DB entries
-            // because it seems to corrupt the metadata or sorting
+            // ARTWORK DATABASE RESTORED with SAFE NUMERIC TOKENS
             if song.artworkData != nil {
-                print("[MediaLibraryBuilder] Artwork available for: \(song.title) (DB entries disabled)")
+                // Use a simple numeric token based on the track number (or itemPid related if needed, 
+                // but track number is safe enough for small libraries and avoids complexity)
+                // Format: "1000" + trackNum
+                let artToken = "100\(trackNum)"
+                
+                // We use the same hash logic as the file upload to know the path
+                // But honestly, we just need to know the PATH relative to Artwork/Originals
+                // Re-calculating hash here to get the path
+                var sha1Hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
+                song.artworkData!.withUnsafeBytes { bytes in
+                    _ = CC_SHA1(bytes.baseAddress, CC_LONG(song.artworkData!.count), &sha1Hash)
+                }
+                let hashString = sha1Hash.map { String(format: "%02x", $0) }.joined()
+                let folderName = String(hashString.prefix(2))
+                let fileName = String(hashString.dropFirst(2))
+                let relativePath = "\(folderName)/\(fileName)" // e.g. "AB/CDEF..."
+                
+                print("[MediaLibraryBuilder] Inserting artwork: \(song.title) -> Token: \(artToken)")
+                
+                // 1. Insert into artwork table
+                try executeSQL(db, """
+                    INSERT INTO artwork (
+                        artwork_token, artwork_source_type, relative_path, artwork_type, 
+                        artwork_variant_type
+                    ) VALUES (
+                        '\(artToken)', 300, 'iTunes/Artwork/Originals/\(relativePath)', 1,
+                        0
+                    )
+                """)
+                
+                // 2. Insert into artwork_token table (One entry per entity type needed)
+                // Link to Item
+                try executeSQL(db, """
+                    INSERT INTO artwork_token (
+                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
+                    ) VALUES (
+                        '\(artToken)', 300, 1, \(itemPid), 0, 0
+                    )
+                """)
+                // Link to Album
+                try executeSQL(db, """
+                    INSERT OR IGNORE INTO artwork_token (
+                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
+                    ) VALUES (
+                        '\(artToken)', 300, 1, \(albumPid), 1, 0
+                    )
+                """)
+                // Link to Artist
+                try executeSQL(db, """
+                    INSERT OR IGNORE INTO artwork_token (
+                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
+                    ) VALUES (
+                        '\(artToken)', 300, 1, \(artistPid), 2, 0
+                    )
+                """)
+                
+                // 3. Insert into best_artwork_token table (Crucial for display)
+                 // Link to Item
+                try executeSQL(db, """
+                    INSERT INTO best_artwork_token (
+                        entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
+                        fetchable_artwork_source_type, artwork_variant_type
+                    ) VALUES (
+                        \(itemPid), 0, 1, '\(artToken)', '\(artToken)', 300, 0
+                    )
+                """)
+                // Link to Album (Use INSERT OR IGNORE to keep the first one as the album cover)
+                if !processedAlbumArtworkPids.contains(albumPid) {
+                    try executeSQL(db, """
+                        INSERT OR IGNORE INTO best_artwork_token (
+                            entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
+                            fetchable_artwork_source_type, artwork_variant_type
+                        ) VALUES (
+                            \(albumPid), 1, 1, '\(artToken)', '\(artToken)', 300, 0
+                        )
+                    """)
+                    processedAlbumArtworkPids.insert(albumPid)
+                }
+                
+                 // Link to Artist (Use INSERT OR IGNORE)
+                try executeSQL(db, """
+                    INSERT OR IGNORE INTO best_artwork_token (
+                        entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
+                        fetchable_artwork_source_type, artwork_variant_type
+                    ) VALUES (
+                        \(artistPid), 2, 1, '\(artToken)', '\(artToken)', 300, 0
+                    )
+                """)
             }
             
             trackNum += 1
@@ -935,7 +1020,7 @@ class MediaLibraryBuilder {
                     location_kind_id
                 ) VALUES (
                     \(itemPid), '\(escapedTitle)', '\(escapedTitle)', 1, 1, \(song.durationMs), \(song.year),
-                    '\(escapedFilename)', \(song.fileSize), NULL, 0, \(now),
+                    '\(escapedFilename)', \(song.fileSize), \(MediaLibraryBuilder.generateIntegrityHex(filename: song.remoteFilename)), 0, \(now),
                     1, 0, 0, 0, 0, 0,
                     42
                 )
@@ -975,11 +1060,88 @@ class MediaLibraryBuilder {
             // INSERT into chapter
             try executeSQL(db, "INSERT INTO chapter (item_pid) VALUES (\(itemPid))")
             
-            // ARTWORK DATABASE DISABLED - causes Queue crash and loses metadata
-            // The artwork file still uploads, but without DB entries
-            // because it seems to corrupt the metadata or sorting
+            // ARTWORK DATABASE RESTORED with SAFE NUMERIC TOKENS
             if song.artworkData != nil {
-                print("[MediaLibraryBuilder] Artwork available for: \(song.title) (DB entries disabled)")
+                let artToken = "100\(trackNum)"
+                
+                // We use the same hash logic as the file upload to know the path
+                // But honestly, we just need to know the PATH relative to Artwork/Originals
+                // Re-calculating hash here to get the path
+                var sha1Hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
+                song.artworkData!.withUnsafeBytes { bytes in
+                    _ = CC_SHA1(bytes.baseAddress, CC_LONG(song.artworkData!.count), &sha1Hash)
+                }
+                let hashString = sha1Hash.map { String(format: "%02x", $0) }.joined()
+                let folderName = String(hashString.prefix(2))
+                let fileName = String(hashString.dropFirst(2))
+                let relativePath = "\(folderName)/\(fileName)" // e.g. "AB/CDEF..."
+                
+                print("[MediaLibraryBuilder] Inserting artwork: \(song.title) -> Token: \(artToken)")
+                
+                // 1. Insert into artwork table
+                try executeSQL(db, """
+                    INSERT INTO artwork (
+                        artwork_token, artwork_source_type, relative_path, artwork_type, 
+                        artwork_variant_type
+                    ) VALUES (
+                        '\(artToken)', 300, 'iTunes/Artwork/Originals/\(relativePath)', 1,
+                        0
+                    )
+                """)
+                
+                // 2. Insert into artwork_token table
+                try executeSQL(db, """
+                    INSERT INTO artwork_token (
+                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
+                    ) VALUES (
+                        '\(artToken)', 300, 1, \(itemPid), 0, 0
+                    )
+                """)
+                 try executeSQL(db, """
+                    INSERT OR IGNORE INTO artwork_token (
+                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
+                    ) VALUES (
+                        '\(artToken)', 300, 1, \(albumPid), 1, 0
+                    )
+                """)
+                 try executeSQL(db, """
+                    INSERT OR IGNORE INTO artwork_token (
+                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
+                    ) VALUES (
+                        '\(artToken)', 300, 1, \(artistPid), 2, 0
+                    )
+                """)
+                
+                // 3. Insert into best_artwork_token table
+                try executeSQL(db, """
+                    INSERT INTO best_artwork_token (
+                        entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
+                        fetchable_artwork_source_type, artwork_variant_type
+                    ) VALUES (
+                        \(itemPid), 0, 1, '\(artToken)', '\(artToken)', 300, 0
+                    )
+                """)
+                
+                if !processedAlbumArtworkPids.contains(albumPid) {
+                    try executeSQL(db, """
+                        INSERT OR IGNORE INTO best_artwork_token (
+                            entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
+                            fetchable_artwork_source_type, artwork_variant_type
+                        ) VALUES (
+                            \(albumPid), 1, 1, '\(artToken)', '\(artToken)', 300, 0
+                        )
+                    """)
+                    processedAlbumArtworkPids.insert(albumPid)
+                }
+                
+                try executeSQL(db, """
+                    INSERT OR IGNORE INTO best_artwork_token (
+                        entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
+                        fetchable_artwork_source_type, artwork_variant_type
+                    ) VALUES (
+                        \(artistPid), 2, 1, '\(artToken)', '\(artToken)', 300, 0
+                    )
+                """)
             }
             
             trackNum += 1

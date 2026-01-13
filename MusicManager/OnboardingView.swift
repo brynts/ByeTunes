@@ -149,6 +149,26 @@ struct OnboardingView: View {
                 handlePairingImport(url: url)
             }
         }
+        .onChange(of: manager.heartbeatReady) { ready in
+            if ready {
+                self.isConnecting = false
+                self.statusMessage = "Successfully Connected!"
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    withAnimation {
+                        self.isComplete = true
+                    }
+                }
+            }
+        }
+        .onChange(of: manager.connectionStatus) { newStatus in
+            if isConnecting {
+                self.statusMessage = newStatus
+                if newStatus.contains("Failed") {
+                    self.showError = true
+                }
+            }
+        }
     }
     
     func handlePairingImport(url: URL?) {
@@ -173,24 +193,11 @@ struct OnboardingView: View {
             statusMessage = "Connecting..."
             showError = false
             
-            manager.startHeartbeat { err in
-                DispatchQueue.main.async {
-                    self.isConnecting = false
-                    if err == IdeviceSuccess {
-                        self.statusMessage = "Successfully Connected!"
-                        
-                        // Delay to show success message before transition
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                            withAnimation {
-                                self.isComplete = true
-                            }
-                        }
-                    } else {
-                        self.statusMessage = "Connection failed"
-                        self.showError = true
-                    }
-                }
-            }
+            isConnecting = true
+            statusMessage = "Connecting..."
+            showError = false
+            
+            manager.startHeartbeat()
         } catch {
             statusMessage = "Import failed"
             showError = true
