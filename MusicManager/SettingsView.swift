@@ -139,17 +139,37 @@ struct SettingsView: View {
                         Divider().padding(.leading, 56)
                         
                         HStack {
-                            Image(systemName: "checkmark.shield")
+                            Image(systemName: "music.note")
                                 .font(.body)
                                 .foregroundColor(.primary)
                                 .frame(width: 28)
                             
-                            Text("Supported Formats")
+                            Text("Music Formats")
                                 .font(.body)
                             
                             Spacer()
                             
                             Text("MP3, FLAC, M4A, WAV")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+                        
+                        Divider().padding(.leading, 56)
+                        
+                        HStack {
+                            Image(systemName: "bell.badge")
+                                .font(.body)
+                                .foregroundColor(.primary)
+                                .frame(width: 28)
+                            
+                            Text("Ringtone Formats")
+                                .font(.body)
+                            
+                            Spacer()
+                            
+                            Text("M4R, MP3")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }

@@ -3,6 +3,7 @@ import Darwin
 import Combine
 import UIKit
 import CommonCrypto
+import SQLite3
 
 // MARK: - Type Aliases
 typealias IdevicePairingFile = OpaquePointer
@@ -70,8 +71,7 @@ class DeviceManager: ObservableObject {
     }
 
     func establishHeartbeat(_ completion: @escaping (Bool) -> Void) {
-        let pairingPath = pairingFile.path
-        
+                 
         var addr = sockaddr_in()
         memset(&addr, 0, MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
@@ -79,7 +79,7 @@ class DeviceManager: ObservableObject {
         inet_pton(AF_INET, "10.7.0.1", &addr.sin_addr)
         
         var pairingPtr: IdevicePairingFile?
-        let pairingErr = idevice_pairing_file_read(pairingFile.path, &pairingPtr)
+        let _ = idevice_pairing_file_read(pairingFile.path, &pairingPtr)
         
         if let oldProvider = provider {
             idevice_provider_free(oldProvider)
@@ -170,7 +170,7 @@ class DeviceManager: ObservableObject {
             
             var port: UInt16 = 0
             var ssl: Bool = false
-            let svcErr = lockdownd_start_service(lockdownd, "com.apple.atc", &port, &ssl)
+            let _ = lockdownd_start_service(lockdownd, "com.apple.atc", &port, &ssl)
             
             lockdownd_client_free(lockdownd)
             
@@ -956,6 +956,217 @@ class DeviceManager: ObservableObject {
             try? FileManager.default.removeItem(at: shmURL)
             
             DispatchQueue.main.async { completion(playlists) }
+        }
+    }
+    
+    // MARK: - Ringtone Injection
+    
+    func injectRingtones(ringtones: [SongMetadata], progress: @escaping (String) -> Void, completion: @escaping (Bool) -> Void) {
+        print("[DeviceManager] injectRingtones called with \(ringtones.count) ringtones")
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            // Step 1: Download existing DB
+            progress("Preparing library...")
+            
+            let semaphoreDownload = DispatchSemaphore(value: 0)
+            var existingDbData: Data?
+            var walData: Data?
+            var shmData: Data?
+            
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { data in
+                existingDbData = data
+                semaphoreDownload.signal()
+            }
+            semaphoreDownload.wait()
+            
+             // Download WAL
+            let semWal = DispatchSemaphore(value: 0)
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal") { data in
+                walData = data
+                semWal.signal()
+            }
+            semWal.wait()
+            
+            // Download SHM
+            let semShm = DispatchSemaphore(value: 0)
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm") { data in
+                shmData = data
+                semShm.signal()
+            }
+            semShm.wait()
+            
+            guard let dbData = existingDbData else {
+                print("[DeviceManager] ERROR: No existing DB found")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            
+            // Step 2: Update Database
+            progress("Updating database...")
+            
+            var dbURL: URL?
+            
+            // Reuse addSongsToExistingDatabase logic? No, ringtones are special.
+            // We'll manually reconstruct the DB session
+            let tempDir = FileManager.default.temporaryDirectory
+            let dbPath = tempDir.appendingPathComponent("RingtoneUpdate.sqlitedb")
+            
+            try? FileManager.default.removeItem(at: dbPath)
+            try? FileManager.default.removeItem(at: tempDir.appendingPathComponent("RingtoneUpdate.sqlitedb-wal"))
+            try? FileManager.default.removeItem(at: tempDir.appendingPathComponent("RingtoneUpdate.sqlitedb-shm"))
+            
+            var insertedPids: [Int64] = []
+            
+            do {
+                try dbData.write(to: dbPath)
+                if let wal = walData { try wal.write(to: tempDir.appendingPathComponent("RingtoneUpdate.sqlitedb-wal")) }
+                if let shm = shmData { try shm.write(to: tempDir.appendingPathComponent("RingtoneUpdate.sqlitedb-shm")) }
+                
+                var db: OpaquePointer?
+                if sqlite3_open(dbPath.path, &db) == SQLITE_OK {
+                    // Call our new method and capture PIDs
+                    insertedPids = try MediaLibraryBuilder.insertRingtones(db: db, ringtones: ringtones)
+                    
+                    // Force checkpoint
+                    if walData != nil {
+                         var errorMsg: UnsafeMutablePointer<CChar>?
+                        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, &errorMsg)
+                         sqlite3_free(errorMsg)
+                    }
+                    
+                    sqlite3_close(db)
+                    dbURL = dbPath
+                }
+            } catch {
+                print("[DeviceManager] DB update error: \(error)")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            
+            // Step 3: Upload Ringtones
+            progress("Uploading ringtones...")
+            
+             // Create Ringtones directory if it doesn't exist?
+            // Usually /iTunes_Control/Ringtones
+            // We need AFC
+            var afc: AfcClientHandle?
+            afc_client_connect(self.provider, &afc)
+            if afc != nil {
+                afc_make_directory(afc, "/iTunes_Control/Ringtones")
+                afc_client_free(afc)
+            }
+            
+            for (index, ringtone) in ringtones.enumerated() {
+                progress("Uploading \(index+1)/\(ringtones.count): \(ringtone.title)")
+                
+                let remotePath = "/iTunes_Control/Ringtones/\(ringtone.remoteFilename)"
+                let sem = DispatchSemaphore(value: 0)
+                var success = false
+                
+                self.uploadFileToDevice(localURL: ringtone.localURL, remotePath: remotePath) { s in
+                    success = s
+                    sem.signal()
+                }
+                sem.wait()
+                
+                if !success {
+                    print("[DeviceManager] Failed to upload ringtone: \(ringtone.title)")
+                }
+            }
+            
+            // Step 3b: Merge and Upload Ringtones.plist
+            progress("Updating Ringtones index...")
+            
+            // 1. Download existing plist
+            let tempPlistURL = tempDir.appendingPathComponent("ExistingRingtones.plist")
+            var existingDict: [String: Any]?
+            
+            let semDl = DispatchSemaphore(value: 0)
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/Ringtones.plist", localURL: tempPlistURL) { success in
+                semDl.signal()
+            }
+            semDl.wait()
+            
+            if FileManager.default.fileExists(atPath: tempPlistURL.path) {
+                if let data = try? Data(contentsOf: tempPlistURL),
+                   let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] {
+                    existingDict = plist
+                }
+            }
+            
+            // 2. Prepare merging
+            var rootDict: [String: Any] = existingDict ?? ["Ringtones": [:]]
+            var ringtonesDict = rootDict["Ringtones"] as? [String: Any] ?? [:]
+            
+            // 3. Add new entries
+            for (index, ringtone) in ringtones.enumerated() {
+                 let pid = (index < insertedPids.count) ? insertedPids[index] : Int64.random(in: 1000000000...9999999999)
+                 // 3uTools uses 16-char hex for GUID, and Filename as Key
+                 let shortGUID = String((0..<16).map { _ in "0123456789ABCDEF".randomElement()! })
+                 
+                 // Required fields for Ringtones.plist
+                 let entry: [String: Any] = [
+                    "Name": ringtone.title,
+                    "Total Time": ringtone.durationMs,
+                    "PID": pid,
+                    "Protected Content": false,
+                    "GUID": shortGUID
+                 ]
+                 
+                 // Use filename as key
+                 ringtonesDict[ringtone.remoteFilename] = entry
+                 print("[DeviceManager] Ringtone plist entry: \(ringtone.remoteFilename) -> PID \(pid)")
+            }
+            
+            rootDict["Ringtones"] = ringtonesDict
+            
+            // 4. Save and Upload
+            do {
+                let plistData = try PropertyListSerialization.data(fromPropertyList: rootDict, format: .binary, options: 0)
+                let plistURL = tempDir.appendingPathComponent("Ringtones.plist")
+                try plistData.write(to: plistURL)
+                
+                let semPlist = DispatchSemaphore(value: 0)
+                self.uploadFileToDevice(localURL: plistURL, remotePath: "/iTunes_Control/iTunes/Ringtones.plist") { _ in
+                    semPlist.signal()
+                }
+                semPlist.wait()
+                
+                try? FileManager.default.removeItem(at: plistURL)
+                try? FileManager.default.removeItem(at: tempPlistURL)
+            } catch {
+                print("[DeviceManager] Failed to generate/upload Ringtones.plist: \(error)")
+            }
+            
+            // Step 4: Upload Database
+            progress("Syncing library...")
+            
+             // Delete WAL/SHM on device first to be safe
+            var afcDel: AfcClientHandle?
+            afc_client_connect(self.provider, &afcDel)
+            if afcDel != nil {
+                afc_remove_path(afcDel, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb")
+                afc_remove_path(afcDel, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal")
+                afc_remove_path(afcDel, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm")
+                afc_client_free(afcDel)
+            }
+            
+            let semUpload = DispatchSemaphore(value: 0)
+            self.uploadFileToDevice(localURL: dbURL!, remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { _ in
+                semUpload.signal()
+            }
+            semUpload.wait()
+            
+            // Cleanup
+            try? FileManager.default.removeItem(at: dbPath)
+            
+            // Step 5: Notify
+            progress("Done!")
+            self.sendSyncFinishedNotification()
+            
+            DispatchQueue.main.async { completion(true) }
         }
     }
 }

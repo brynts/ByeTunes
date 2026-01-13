@@ -80,7 +80,7 @@ class MediaLibraryBuilder {
             return 301
         case "flac":
             return fourCC("fLaC")  // FLAC FourCC
-        case "m4a", "aac":
+        case "m4a", "aac", "m4r":
             return fourCC("aac ")  // AAC container
         case "alac":
             return fourCC("alac") // Apple Lossless
@@ -898,6 +898,7 @@ class MediaLibraryBuilder {
         let baseDataSQL = """
         INSERT INTO base_location (base_location_id, path) VALUES (0, '');
         INSERT INTO base_location (base_location_id, path) VALUES (3840, 'iTunes_Control/Music/F00');
+        INSERT INTO base_location (base_location_id, path) VALUES (3900, 'iTunes_Control/Ringtones');
         INSERT INTO db_info (db_pid) VALUES (1);
         INSERT INTO genius_config (id, version, default_num_results, min_num_results) VALUES (1, 1, 25, 10);
         INSERT INTO container_seed (container_pid, item_pid, seed_order) VALUES (0, 0, 0);
@@ -1216,6 +1217,14 @@ class MediaLibraryBuilder {
         return insertedPids
     }
     
+    /// Generates 3uTools-style integrity for Ringtones
+    /// Format: Hex(filename + "iTunes_Control/Music/F00")
+    static func generateRingtoneIntegrity(filename: String) -> String {
+        let rawString = filename + "iTunes_Control/Music/F00"
+        guard let data = rawString.data(using: .utf8) else { return "" }
+        return data.map { String(format: "%02X", $0) }.joined()
+    }
+
     private static func executeSQL(_ db: OpaquePointer?, _ sql: String) throws {
         var errMsg: UnsafeMutablePointer<CChar>?
         if sqlite3_exec(db, sql, nil, nil, &errMsg) != SQLITE_OK {
@@ -1424,6 +1433,105 @@ class MediaLibraryBuilder {
             }
             sqlite3_finalize(stmt)
         }
+    }
+    
+    // MARK: - Ringtone Insertion
+    
+    /// Insert ringtones into the database
+    @discardableResult
+    static func insertRingtones(db: OpaquePointer?, ringtones: [SongMetadata]) throws -> [Int64] {
+        let now = Int(Date().timeIntervalSince1970)
+        var insertedPids: [Int64] = []
+        
+        // Ensure base_location 3900 exists
+        let baseLocSQL = "INSERT OR IGNORE INTO base_location (base_location_id, path) VALUES (3900, 'iTunes_Control/Ringtones')"
+        var baseErrMsg: UnsafeMutablePointer<CChar>?
+        if sqlite3_exec(db, baseLocSQL, nil, nil, &baseErrMsg) != SQLITE_OK {
+            let error = baseErrMsg.map { String(cString: $0) } ?? "Unknown error"
+            sqlite3_free(baseErrMsg)
+            print("[MediaLibraryBuilder] Warning: Failed to insert ringtone base location: \(error)")
+        }
+        
+        for ringtone in ringtones {
+            let itemPid = SongMetadata.generatePersistentId()
+            insertedPids.append(itemPid)
+            
+            // Generate sort orders
+            let titleOrder = insertSortMap(db: db, name: ringtone.title)
+            
+            print("[MediaLibraryBuilder] Adding Ringtone: \(ringtone.title) -> \(ringtone.remoteFilename)")
+            
+            // INSERT into item table (media_type 16384 for Ringtone, base_location 3900)
+            try executeSQL(db, """
+                INSERT INTO item (
+                    item_pid, media_type, title_order, title_order_section,
+                    item_artist_pid, item_artist_order, item_artist_order_section,
+                    series_name_order, series_name_order_section,
+                    album_pid, album_order, album_order_section,
+                    album_artist_pid, album_artist_order, album_artist_order_section,
+                    composer_pid, composer_order, composer_order_section,
+                    genre_id, genre_order, genre_order_section,
+                    disc_number, track_number, episode_sort_id,
+                    base_location_id, remote_location_id,
+                    exclude_from_shuffle, keep_local, keep_local_status, keep_local_status_reason, keep_local_constraints,
+                    in_my_library, is_compilation, date_added, show_composer, is_music_show, date_downloaded, download_source_container_pid
+                ) VALUES (
+                    \(itemPid), 16384, \(titleOrder), 1,
+                    0, 0, 0,
+                    0, 27,
+                    33003300, 0, 0,
+                    0, 0, 0,
+                    0, 0, 27,
+                    0, 0, 0,
+                    0, 0, 0,
+                    3900, 0,
+                    1, 1, 2, 0, 0,
+                    1, 0, \(now), 0, 0, \(now), 0
+                )
+            """)
+            
+            // INSERT into item_extra
+            // Note: Ringtones typically don't track duration in item_extra same way, but let's put it.
+            // location_kind_id? check. 42 is file.
+            // media_kind? usually 1 for music? maybe 16384 for ringtone? or just 1.
+            // Testing showed that media_type in item table is the KEY.
+            let escapedTitle = ringtone.title.replacingOccurrences(of: "'", with: "''")
+            let escapedFilename = ringtone.remoteFilename.replacingOccurrences(of: "'", with: "''")
+            try executeSQL(db, """
+                INSERT INTO item_extra (
+                    item_pid, title, sort_title, disc_count, track_count, total_time_ms, year,
+                    location, file_size, integrity, is_audible_audio_book, date_modified,
+                    media_kind, content_rating, content_rating_level, is_user_disabled, bpm, genius_id,
+                    location_kind_id
+                ) VALUES (
+                    \(itemPid), '\(escapedTitle)', '\(escapedTitle)', 0, 0, \(ringtone.durationMs), \(ringtone.year),
+                    '\(escapedFilename)', \(ringtone.fileSize), X'\(MediaLibraryBuilder.generateRingtoneIntegrity(filename: ringtone.remoteFilename))', 0, \(now),
+                    16384, 0, 0, 0, 0, 0,
+                    42
+                )
+            """)
+            
+            // INSERT into item_playback
+            let audioFmt = audioFormatForExtension("m4r") // Always M4R
+            try executeSQL(db, """
+                INSERT INTO item_playback (
+                    item_pid, audio_format, bit_rate, codec_type, codec_subtype, data_kind,
+                    duration, has_video, relative_volume, sample_rate
+                ) VALUES (
+                    \(itemPid), \(audioFmt), 320, 0, 0, 0,
+                    0, 0, 0, 44100.0
+                )
+            """)
+            
+            // INSERT into item_stats
+            try executeSQL(db, "INSERT INTO item_stats (item_pid, date_accessed) VALUES (\(itemPid), \(now))")
+            
+            // INSERT into item_store
+            let syncId = SongMetadata.generatePersistentId()
+            try executeSQL(db, "INSERT INTO item_store (item_pid, sync_id, sync_in_my_library) VALUES (\(itemPid), \(syncId), 1)")
+        }
+        
+        return insertedPids
     }
 }
 

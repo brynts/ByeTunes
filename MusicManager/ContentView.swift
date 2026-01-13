@@ -5,6 +5,7 @@ struct ContentView: View {
     @StateObject var manager = DeviceManager.shared
     @State private var status = "Ready"
     @State private var songs: [SongMetadata] = []
+    @State private var ringtones: [RingtoneMetadata] = []
     @State private var isInjecting = false
     @State private var selectedTab = 0
     @State private var hasCompletedOnboarding = false
@@ -35,6 +36,8 @@ struct ContentView: View {
                                 isInjecting: $isInjecting,
                                 status: $status
                             )
+                        } else if selectedTab == 1 {
+                            RingtonesView(manager: manager, ringtones: $ringtones)
                         } else {
                             SettingsView(
                                 manager: manager,
@@ -95,13 +98,24 @@ struct FloatingTabBar: View {
                 selectedTab = 0
             }
             
+
+            
+            // Ringtones Tab
+            TabBarButton(
+                icon: "bell.badge.fill",
+                title: "Ringtones",
+                isSelected: selectedTab == 1
+            ) {
+                selectedTab = 1
+            }
+            
             // Settings Tab
             TabBarButton(
                 icon: "gearshape.fill",
                 title: "Settings",
-                isSelected: selectedTab == 1
+                isSelected: selectedTab == 2
             ) {
-                selectedTab = 1
+                selectedTab = 2
             }
         }
         .padding(.horizontal, 8)
