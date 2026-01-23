@@ -209,7 +209,13 @@ struct SongMetadata: Identifiable {
                 
                 // Album Artist
                 if (combined.contains("ALBUMARTIST") || combined.contains("TPE2") || combined.contains("AART")) {
-                   albumArtist = val
+                   let trimmed = val.trimmingCharacters(in: .whitespacesAndNewlines)
+                   if !trimmed.isEmpty && trimmed.lowercased() != "unknown artist" {
+                       albumArtist = trimmed
+                       print("[SongMetadata] Extracted Album Artist: \(trimmed) from key: \(combined)")
+                   } else {
+                       print("[SongMetadata] Ignored invalid Album Artist: '\(val)'")
+                   }
                 }
 
                 // Year extraction: check for DATE, YEAR, TYER (ID3v2.3), TDRC (ID3v2.4), ©day (iTunes/M4A)
@@ -223,6 +229,11 @@ struct SongMetadata: Identifiable {
                     }
                 }
             }
+        }
+        
+        // Final fallback sanitization
+        if let aa = albumArtist, (aa.isEmpty || aa.lowercased() == "unknown artist") {
+            albumArtist = nil
         }
         
         print("[SongMetadata] Final: title=\(title), artist=\(artist), album=\(album), track=\(trackNumber ?? 0)/\(trackCount ?? 0)")

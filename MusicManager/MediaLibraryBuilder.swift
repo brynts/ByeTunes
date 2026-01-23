@@ -136,8 +136,15 @@ class MediaLibraryBuilder {
         // Insertar data basica
         try insertBaseData(db: db)
         
-        // Meter las canciones y sus entities
-        let insertResult = try insertSongs(db: db, songs: songs)
+        // Meter las canciones y sus entities usando la logica unificada (que tiene los fixes de Album Artist)
+        let insertResult = try insertSongsWithExisting(
+            db: db,
+            songs: songs,
+            existingArtists: [:],
+            existingAlbums: [:],
+            existingGenres: [:],
+            existingAlbumArtists: [:]
+        )
         let songPids = insertResult.pids
         let artworkInfo = insertResult.artworkInfo
         
@@ -841,7 +848,11 @@ class MediaLibraryBuilder {
             let groupingKey = SongMetadata.generateGroupingKey(albumName)
             let groupingHex = groupingKey.map { String(format: "%02x", $0) }.joined()
             if let song = songs.first(where: { $0.album == albumName }) {
-                let aaPid = albumArtists[song.artist] ?? 0
+                // FIX: Use effective album artist name for lookup!
+                // Previously this used song.artist, which failed if Track Artist != Album Artist
+                let effectiveName = song.albumArtist ?? song.artist
+                let aaPid = albumArtists[effectiveName] ?? 0
+                
                 let syncId = SongMetadata.generatePersistentId()
                 let repItem = albumRepItem[albumName] ?? 0
                 try executeSQL(db, """
@@ -1132,323 +1143,7 @@ class MediaLibraryBuilder {
     
 
     
-    @discardableResult
-    private static func insertSongs(db: OpaquePointer?, songs: [SongMetadata]) throws -> (pids: [Int64], artworkInfo: [ArtworkInfo]) {
-        let now = Int(Date().timeIntervalSince1970)
-        var trackNum = 1
-        
-        // Track created entities for relationships
-        var artists: [String: Int64] = [:]
-        var albums: [String: Int64] = [:]
-        var genres: [String: Int64] = [:]
-        var albumArtists: [String: Int64] = [:]
-        
-        // Track representative_item_pid for each entity (first song inserted)
-        var artistRepItem: [String: Int64] = [:]
-        var albumRepItem: [String: Int64] = [:]
-        var genreRepItem: [String: Int64] = [:]
-        var albumArtistRepItem: [String: Int64] = [:]
-        
-        // Track processed albums for artwork optimization
-        var processedAlbumArtworkPids = Set<Int64>()
-        
-        var insertedPids: [Int64] = []
-        var collectedArtworkInfo: [ArtworkInfo] = []
-        
-        for song in songs {
-            let itemPid = SongMetadata.generatePersistentId()
-            insertedPids.append(itemPid)
-            
-            // Get or create artist - track first item as representative
-            if artists[song.artist] == nil {
-                artists[song.artist] = SongMetadata.generatePersistentId()
-                artistRepItem[song.artist] = itemPid  // First song for this artist
-            }
-            let artistPid = artists[song.artist]!
-            
-            // Get or create album artist (same as artist) - track first item as representative
-            if albumArtists[song.artist] == nil {
-                albumArtists[song.artist] = SongMetadata.generatePersistentId()
-                albumArtistRepItem[song.artist] = itemPid  // First song for this album artist
-            }
-            let albumArtistPid = albumArtists[song.artist]!
-            
-            // Get or create album - track first item as representative
-            if albums[song.album] == nil {
-                albums[song.album] = SongMetadata.generatePersistentId()
-                albumRepItem[song.album] = itemPid  // First song for this album
-            }
-            let albumPid = albums[song.album]!
-            
-            // Get or create genre - track first item as representative
-            if genres[song.genre] == nil {
-                genres[song.genre] = SongMetadata.generatePersistentId()
-                genreRepItem[song.genre] = itemPid  // First song for this genre
-            }
-            let genreId = genres[song.genre]!
-            
-            // Generate sort orders by inserting into sort_map - CRITICAL for Albums/Artists to appear in lists
-            let titleOrder = insertSortMap(db: db, name: song.title)
-            let artistOrder = insertSortMap(db: db, name: song.artist)
-            let albumOrder = insertSortMap(db: db, name: song.album)
-            let genreOrder = insertSortMap(db: db, name: song.genre)
-            
-            // Resolve metadata with fallbacks
-            let dbTrackNum = song.trackNumber ?? trackNum
-            let dbTrackCount = song.trackCount ?? 1
-            let dbDiscNum = song.discNumber ?? 1
-            let dbDiscCount = song.discCount ?? 1
-            
-            // INSERT into item table
-            try executeSQL(db, """
-                INSERT INTO item (
-                    item_pid, media_type, title_order, title_order_section,
-                    item_artist_pid, item_artist_order, item_artist_order_section,
-                    series_name_order, series_name_order_section,
-                    album_pid, album_order, album_order_section,
-                    album_artist_pid, album_artist_order, album_artist_order_section,
-                    composer_pid, composer_order, composer_order_section,
-                    genre_id, genre_order, genre_order_section,
-                    disc_number, track_number, episode_sort_id,
-                    base_location_id, remote_location_id,
-                    exclude_from_shuffle, keep_local, keep_local_status, keep_local_status_reason, keep_local_constraints,
-                    in_my_library, is_compilation, date_added, show_composer, is_music_show, date_downloaded, download_source_container_pid
-                ) VALUES (
-                    \(itemPid), 8, \(titleOrder), 1,
-                    \(artistPid), \(artistOrder), 1,
-                    0, 27,
-                    \(albumPid), \(albumOrder), 1,
-                    \(albumArtistPid), \(artistOrder), 1,
-                    0, 0, 27,
-                    \(genreId), \(genreOrder), 1,
-                    \(dbDiscNum), \(dbTrackNum), 1,
-                    3840, 0,
-                    0, 1, 2, 0, 0,
-                    1, 0, \(now), 0, 0, \(now), 0
-                )
-            """)
-            
-            // INSERT into item_extra
-            let escapedTitle = song.title.replacingOccurrences(of: "'", with: "''")
-            let escapedFilename = song.remoteFilename.replacingOccurrences(of: "'", with: "''")
-            try executeSQL(db, """
-                INSERT INTO item_extra (
-                    item_pid, title, sort_title, disc_count, track_count, total_time_ms, year,
-                    location, file_size, integrity, is_audible_audio_book, date_modified,
-                    media_kind, content_rating, content_rating_level, is_user_disabled, bpm, genius_id,
-                    location_kind_id
-                ) VALUES (
-                    \(itemPid), '\(escapedTitle)', '\(escapedTitle)', \(dbDiscCount), \(dbTrackCount), \(song.durationMs), \(song.year),
-                    '\(escapedFilename)', \(song.fileSize), \(MediaLibraryBuilder.generateIntegrityHex(filename: song.remoteFilename)), 0, \(now),
-                    1, 0, 0, 0, 0, 0,
-                    42
-                )
-            """)
-            
-            // INSERT into item_playback
-            let audioFmt = audioFormatForExtension(URL(fileURLWithPath: song.remoteFilename).pathExtension)
-            try executeSQL(db, """
-                INSERT INTO item_playback (
-                    item_pid, audio_format, bit_rate, codec_type, codec_subtype, data_kind,
-                    duration, has_video, relative_volume, sample_rate
-                ) VALUES (
-                    \(itemPid), \(audioFmt), 320, 0, 0, 0,
-                    0, 0, 0, 44100.0
-                )
-            """)
-            
-            // INSERT into item_stats
-            try executeSQL(db, "INSERT INTO item_stats (item_pid, date_accessed) VALUES (\(itemPid), \(now))")
-            
-            // INSERT into item_store
-            let syncId = SongMetadata.generatePersistentId()
-            try executeSQL(db, "INSERT INTO item_store (item_pid, sync_id, sync_in_my_library) VALUES (\(itemPid), \(syncId), 1)")
-            
-            // INSERT into item_video
-            try executeSQL(db, "INSERT INTO item_video (item_pid) VALUES (\(itemPid))")
-            
-            // INSERT into item_search
-            try executeSQL(db, """
-                INSERT INTO item_search (item_pid, search_title, search_album, search_artist, search_composer, search_album_artist)
-                VALUES (\(itemPid), \(titleOrder), \(albumOrder), \(artistOrder), 0, \(artistOrder))
-            """)
-            
-            // INSERT into lyrics
-            try executeSQL(db, "INSERT INTO lyrics (item_pid) VALUES (\(itemPid))")
-            
-            // INSERT into chapter
-            try executeSQL(db, "INSERT INTO chapter (item_pid) VALUES (\(itemPid))")
-            
-            // ARTWORK DATABASE with CORRECT HASH ALGORITHM
-            // iOS computes artwork path as SHA1(artwork_token), NOT SHA1(image_data)!
-            if song.artworkData != nil {
-                // Use ItemPID for token to guarantee uniqueness and alignment
-                let artToken = "100\(itemPid)"
-                
-                // CORRECT ALGORITHM: Hash the TOKEN, not the image data
-                var sha1Hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
-                let tokenData = artToken.data(using: .utf8)!
-                tokenData.withUnsafeBytes { bytes in
-                    _ = CC_SHA1(bytes.baseAddress, CC_LONG(tokenData.count), &sha1Hash)
-                }
-                let hashString = sha1Hash.map { String(format: "%02x", $0) }.joined()
-                let folderName = String(hashString.prefix(2))
-                let fileName = String(hashString.dropFirst(2))
-                let relativePath = "\(folderName)/\(fileName)"
-                
-                Logger.shared.log("[MediaLibraryBuilder] ARTWORK (correct algorithm):")
-                Logger.shared.log("  -> Token: \(artToken)")
-                Logger.shared.log("  -> SHA1(token): \(hashString)")
-                Logger.shared.log("  -> relativePath: \(relativePath)")
-                
-                collectedArtworkInfo.append(ArtworkInfo(
-                    itemPid: itemPid, 
-                    artworkHash: relativePath, 
-                    artworkToken: artToken, 
-                    fileSize: UInt32(song.artworkData!.count)
-                ))
-                
-                // Insert into artwork table with ColorAnalysis (required for album artwork display)
-                let colorAnalysis = """
-                {"ColorAnalysis":{"1":{"primaryTextColorLight":"NO","secondaryTextColorLight":"NO","secondaryTextColor":"#FFFFFF","tertiaryTextColorLight":"NO","primaryTextColor":"#FFFFFF","tertiaryTextColor":"#CCCCCC","backgroundColorLight":"NO","backgroundColor":"#333333"}}}
-                """
-                try executeSQL(db, """
-                    INSERT INTO artwork (
-                        artwork_token, artwork_source_type, relative_path, artwork_type, 
-                        interest_data, artwork_variant_type
-                    ) VALUES (
-                        '\(artToken)', 1, '\(relativePath)', 1, '\(colorAnalysis)', 0
-                    )
-                """)
-                
-                try executeSQL(db, """
-                    INSERT INTO artwork_token (
-                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
-                    ) VALUES ('\(artToken)', 1, 1, \(itemPid), 0, 0)
-                """)
-                // entity_type=1 for album table reference
-                try executeSQL(db, """
-                    INSERT OR IGNORE INTO artwork_token (
-                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
-                    ) VALUES ('\(artToken)', 1, 1, \(albumPid), 1, 0)
-                """)
 
-                // entity_type=4 for album artwork in library view
-                try executeSQL(db, """
-                    INSERT OR IGNORE INTO artwork_token (
-                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
-                    ) VALUES ('\(artToken)', 1, 1, \(albumPid), 4, 0)
-                """)
-                try executeSQL(db, """
-                    INSERT OR IGNORE INTO artwork_token (
-                        artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
-                    ) VALUES ('\(artToken)', 1, 1, \(artistPid), 2, 0)
-                """)
-                
-                try executeSQL(db, """
-                    INSERT INTO best_artwork_token (
-                        entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
-                        fetchable_artwork_source_type, artwork_variant_type
-                    ) VALUES (\(itemPid), 0, 1, '\(artToken)', '', 0, 0)
-                """)
-                if !processedAlbumArtworkPids.contains(albumPid) {
-                    // entity_type=1 for album table reference
-                    try executeSQL(db, """
-                        INSERT OR IGNORE INTO best_artwork_token (
-                            entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
-                            fetchable_artwork_source_type, artwork_variant_type
-                        ) VALUES (\(albumPid), 1, 1, '\(artToken)', '', 0, 0)
-                    """)
-                    // entity_type=4 for album artwork in library view
-                    try executeSQL(db, """
-                        INSERT OR IGNORE INTO best_artwork_token (
-                            entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
-                            fetchable_artwork_source_type, artwork_variant_type
-                        ) VALUES (\(albumPid), 4, 1, '\(artToken)', '', 0, 0)
-                    """)
-                    processedAlbumArtworkPids.insert(albumPid)
-                }
-                try executeSQL(db, """
-                    INSERT OR IGNORE INTO best_artwork_token (
-                        entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
-                        fetchable_artwork_source_type, artwork_variant_type
-                    ) VALUES (\(artistPid), 2, 1, '\(artToken)', '', 0, 0)
-                """)
-            }
-            
-
-            
-            trackNum += 1
-        }
-        
-        // INSERT artists
-        for (artistName, artistPid) in artists {
-            let escapedName = artistName.replacingOccurrences(of: "'", with: "''")
-            let groupingKey = SongMetadata.generateGroupingKey(artistName)
-            let groupingHex = groupingKey.map { String(format: "%02x", $0) }.joined()
-            let syncId = SongMetadata.generatePersistentId()
-            let repItem = artistRepItem[artistName] ?? 0
-            try executeSQL(db, """
-                INSERT INTO item_artist (item_artist_pid, item_artist, sort_item_artist, series_name, grouping_key, sync_id, keep_local, representative_item_pid)
-                VALUES (\(artistPid), '\(escapedName)', '\(escapedName)', '', X'\(groupingHex)', \(syncId), 1, \(repItem))
-            """)
-        }
-        
-        // INSERT album artists - includes sort_order/name_order needed for Artists view
-        for (artistName, aaPid) in albumArtists {
-            let escapedName = artistName.replacingOccurrences(of: "'", with: "''")
-            let groupingKey = SongMetadata.generateGroupingKey(artistName)
-            let groupingHex = groupingKey.map { String(format: "%02x", $0) }.joined()
-            let syncId = SongMetadata.generatePersistentId()
-            let repItem = albumArtistRepItem[artistName] ?? 0
-            // Get/create sort_map entry for this artist - needed for Artists list view
-            let nameOrder = insertSortMap(db: db, name: artistName)
-            // Calculate section (first letter: A=1, B=2, etc., non-alpha=27)
-            var sortOrderSection = 27
-            if let firstChar = artistName.uppercased().first {
-                let charValue = Int(firstChar.asciiValue ?? 0)
-                if charValue >= 65 && charValue <= 90 { // A-Z
-                    sortOrderSection = charValue - 64 // A=1, B=2, etc.
-                }
-            }
-            try executeSQL(db, """
-                INSERT INTO album_artist (album_artist_pid, album_artist, sort_album_artist, grouping_key, sync_id, keep_local, representative_item_pid, sort_order, sort_order_section, name_order)
-                VALUES (\(aaPid), '\(escapedName)', '\(escapedName)', X'\(groupingHex)', \(syncId), 1, \(repItem), \(nameOrder), \(sortOrderSection), \(nameOrder))
-            """)
-        }
-        
-        // INSERT albums
-        for (albumName, albumPid) in albums {
-            let escapedName = albumName.replacingOccurrences(of: "'", with: "''")
-            let groupingKey = SongMetadata.generateGroupingKey(albumName)
-            let groupingHex = groupingKey.map { String(format: "%02x", $0) }.joined()
-            // Find a song with this album to get artist and year
-            if let song = songs.first(where: { $0.album == albumName }) {
-                let aaPid = albumArtists[song.artist] ?? 0
-                let syncId = SongMetadata.generatePersistentId()
-                let repItem = albumRepItem[albumName] ?? 0
-                try executeSQL(db, """
-                    INSERT INTO album (album_pid, album, sort_album, album_artist_pid, grouping_key, album_year, keep_local, sync_id, representative_item_pid)
-                    VALUES (\(albumPid), '\(escapedName)', '\(escapedName)', \(aaPid), X'\(groupingHex)', \(song.year), 1, \(syncId), \(repItem))
-                """)
-            }
-        }
-        
-        // INSERT genres
-        for (genreName, genreId) in genres {
-            let escapedName = genreName.replacingOccurrences(of: "'", with: "''")
-            let groupingKey = SongMetadata.generateGroupingKey(genreName)
-            let groupingHex = groupingKey.map { String(format: "%02x", $0) }.joined()
-            let repItem = genreRepItem[genreName] ?? 0
-            try executeSQL(db, """
-                INSERT INTO genre (genre_id, genre, grouping_key, representative_item_pid)
-                VALUES (\(genreId), '\(escapedName)', X'\(groupingHex)', \(repItem))
-            """)
-        }
-        
-        print("[MediaLibraryBuilder] Inserted \(songs.count) songs, \(collectedArtworkInfo.count) with artwork")
-        return (insertedPids, collectedArtworkInfo)
-    }
     
     /// Generates 3uTools-style integrity for Ringtones
     /// Format: Hex(filename + "iTunes_Control/Music/F00")
