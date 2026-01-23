@@ -662,9 +662,7 @@ class DeviceManager: ObservableObject {
                 return
             }
             
-            // Delete WAL/SHM files (they can cause issues)
-            afc_remove_path(afc, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm")
-            afc_remove_path(afc, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal")
+            // Delete WAL/SHM moved to Step 5 to prevent race conditions
             
             // Create ALL necessary directories (including parents)
             afc_make_directory(afc, "/iTunes_Control")
@@ -813,6 +811,15 @@ class DeviceManager: ObservableObject {
             // Step 5: Upload merged database
             progress("Uploading database...")
             Logger.shared.log("[DeviceManager] Step 5: Uploading database")
+
+            // Fix for Library Wipe: Delete WAL/SHM immediately before uploading the new DB.
+            var afcDelete: AfcClientHandle?
+            afc_client_connect(self.provider, &afcDelete)
+            if afcDelete != nil {
+                 afc_remove_path(afcDelete, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm")
+                 afc_remove_path(afcDelete, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal")
+                 afc_client_free(afcDelete)
+            }
             
             let semUploadDB = DispatchSemaphore(value: 0)
             var dbUploadSuccess = false
@@ -921,9 +928,7 @@ class DeviceManager: ObservableObject {
             var afc: AfcClientHandle?
             afc_client_connect(self.provider, &afc)
             if afc != nil {
-                // Remove WAL/SHM to avoid drift
-                afc_remove_path(afc, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm")
-                afc_remove_path(afc, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal")
+                // WAL/SHM deletion moved to Step 5
                 
                 // Ensure dirs
                 afc_make_directory(afc, "/iTunes_Control/Music/F00")
@@ -1090,6 +1095,15 @@ class DeviceManager: ObservableObject {
             // Step 5: Upload database
             progress("Uploading database...")
             Logger.shared.log("[DeviceManager] Step 5: Uploading database")
+
+            // Fix for Library Wipe: Delete WAL/SHM immediately before uploading the new DB.
+            var afcDelete: AfcClientHandle?
+            afc_client_connect(self.provider, &afcDelete)
+            if afcDelete != nil {
+                 afc_remove_path(afcDelete, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm")
+                 afc_remove_path(afcDelete, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal")
+                 afc_client_free(afcDelete)
+            }
             
             let semUploadDB = DispatchSemaphore(value: 0)
             var dbUploadSuccess = false

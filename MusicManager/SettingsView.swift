@@ -451,43 +451,7 @@ struct SettingsView: View {
                     }
                 }
                 
-                // Debug Section
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("DEBUG")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.secondary)
-                        .tracking(0.5)
-                    
-                    Button {
-                        NotificationCenter.default.post(name: NSNotification.Name("ShowLogViewer"), object: nil)
-                    } label: {
-                        HStack {
-                            Image(systemName: "terminal.fill")
-                                .font(.body)
-                                .foregroundColor(.gray)
-                                .frame(width: 28)
-                            
-                            Text("View Logs")
-                                .font(.body)
-                                .foregroundColor(.primary)
-                            
-                            Spacer()
-                            
-                            Image(systemName: "chevron.right")
-                                .font(.caption)
-                                .foregroundColor(Color(.systemGray3))
-                        }
-                        .padding(.vertical, 14)
-                        .padding(.horizontal, 16)
-                        .background(Color(.systemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color(.systemGray5), lineWidth: 1)
-                        )
-                    }
-                }
+
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 100)
