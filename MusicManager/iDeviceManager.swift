@@ -808,32 +808,61 @@ class DeviceManager: ObservableObject {
             Logger.shared.log("[DeviceManager] Step 4.5: ArtworkDB generation SKIPPED - iOS handles artwork internally")
 
             
-            // Step 5: Upload merged database
+            // Step 5: Upload merged database (Atomic Swap)
             progress("Uploading database...")
-            Logger.shared.log("[DeviceManager] Step 5: Uploading database")
-
-            // Fix for Library Wipe: Delete WAL/SHM immediately before uploading the new DB.
-            var afcDelete: AfcClientHandle?
-            afc_client_connect(self.provider, &afcDelete)
-            if afcDelete != nil {
-                 afc_remove_path(afcDelete, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm")
-                 afc_remove_path(afcDelete, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal")
-                 afc_client_free(afcDelete)
-            }
+            Logger.shared.log("[DeviceManager] Step 5: Uploading database (Atomic Upgrade)")
             
+            let tempDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb.temp"
+            let finalDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+            let shmPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm"
+            let walPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal"
+            
+            // 1. Upload to .temp file
             let semUploadDB = DispatchSemaphore(value: 0)
             var dbUploadSuccess = false
-            self.uploadFileToDevice(localURL: dbURL, remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { success in
+            self.uploadFileToDevice(localURL: dbURL, remotePath: tempDBPath) { success in
                 dbUploadSuccess = success
                 semUploadDB.signal()
             }
             semUploadDB.wait()
             
             if !dbUploadSuccess {
-                Logger.shared.log("[DeviceManager] ERROR: Failed to upload database")
+                Logger.shared.log("[DeviceManager] ERROR: Failed to upload temp database")
                 DispatchQueue.main.async { completion(false) }
                 return
             }
+            
+            // 2. Perform Atomic Swap
+            var afcSwap: AfcClientHandle?
+            afc_client_connect(self.provider, &afcSwap)
+            
+            guard afcSwap != nil else {
+                Logger.shared.log("[DeviceManager] ERROR: Failed to connect AFC for atomic swap")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            
+            // Delete WAL/SHM first
+            afc_remove_path(afcSwap, shmPath)
+            afc_remove_path(afcSwap, walPath)
+            
+            // Delete old DB
+            afc_remove_path(afcSwap, finalDBPath)
+            
+            // Rename Temp -> Final
+            let renameErr = afc_rename_path(afcSwap, tempDBPath, finalDBPath)
+            
+            if renameErr != nil {
+                Logger.shared.log("[DeviceManager] ERROR: Failed to rename database (Error: \(renameErr!))")
+                 // Cleanup
+                 afc_remove_path(afcSwap, tempDBPath)
+                 afc_client_free(afcSwap)
+                 DispatchQueue.main.async { completion(false) }
+                 return
+            }
+            
+            Logger.shared.log("[DeviceManager] Database swapped successfully.")
+            afc_client_free(afcSwap)
             
             // ...
             
@@ -1092,26 +1121,61 @@ class DeviceManager: ObservableObject {
                  }
             }
 
-            // Step 5: Upload database
+            // Step 5: Upload merged database (Atomic Swap)
             progress("Uploading database...")
-            Logger.shared.log("[DeviceManager] Step 5: Uploading database")
-
-            // Fix for Library Wipe: Delete WAL/SHM immediately before uploading the new DB.
-            var afcDelete: AfcClientHandle?
-            afc_client_connect(self.provider, &afcDelete)
-            if afcDelete != nil {
-                 afc_remove_path(afcDelete, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm")
-                 afc_remove_path(afcDelete, "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal")
-                 afc_client_free(afcDelete)
-            }
+            Logger.shared.log("[DeviceManager] Step 5: Uploading database (Atomic Upgrade)")
             
+            let tempDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb.temp"
+            let finalDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+            let shmPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm"
+            let walPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal"
+            
+            // 1. Upload to .temp file
             let semUploadDB = DispatchSemaphore(value: 0)
             var dbUploadSuccess = false
-            self.uploadFileToDevice(localURL: dbURL, remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { success in
+            self.uploadFileToDevice(localURL: dbURL, remotePath: tempDBPath) { success in
                 dbUploadSuccess = success
                 semUploadDB.signal()
             }
             semUploadDB.wait()
+            
+            if !dbUploadSuccess {
+                Logger.shared.log("[DeviceManager] ERROR: Failed to upload temp database")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            
+            // 2. Perform Atomic Swap
+            var afcSwap: AfcClientHandle?
+            afc_client_connect(self.provider, &afcSwap)
+            
+            guard afcSwap != nil else {
+                Logger.shared.log("[DeviceManager] ERROR: Failed to connect AFC for atomic swap")
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            
+            // Delete WAL/SHM first
+            afc_remove_path(afcSwap, shmPath)
+            afc_remove_path(afcSwap, walPath)
+            
+            // Delete old DB
+            afc_remove_path(afcSwap, finalDBPath)
+            
+            // Rename Temp -> Final
+            let renameErr = afc_rename_path(afcSwap, tempDBPath, finalDBPath)
+            
+            if renameErr != nil {
+                Logger.shared.log("[DeviceManager] ERROR: Failed to rename database (Error: \(renameErr!))")
+                 // Cleanup
+                 afc_remove_path(afcSwap, tempDBPath)
+                 afc_client_free(afcSwap)
+                 DispatchQueue.main.async { completion(false) }
+                 return
+            }
+            
+            Logger.shared.log("[DeviceManager] Database swapped successfully.")
+            afc_client_free(afcSwap)
             
             if !dbUploadSuccess {
                 Logger.shared.log("[DeviceManager] ERROR: Failed to upload database")
