@@ -15,6 +15,9 @@ struct SettingsView: View {
     
     var body: some View {
         ZStack(alignment: .bottom) {
+            Color(.systemGroupedBackground)
+                .ignoresSafeArea()
+            
             ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 // Header
@@ -82,20 +85,18 @@ struct SettingsView: View {
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
                                 
-                                if !manager.heartbeatReady {
-                                    Button {
-                                        manager.startHeartbeat()
-                                    } label: {
-                                        Text("Retry")
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundColor(.white)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 6)
-                                            .background(Color.accentColor)
-                                            .clipShape(Capsule())
-                                    }
-                                    .padding(.leading, 8)
+                                Button {
+                                    manager.startHeartbeat()
+                                } label: {
+                                    Text("Refresh")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Color.accentColor)
+                                        .clipShape(Capsule())
                                 }
+                                .padding(.leading, 8)
                             }
                         }
                         .padding(.vertical, 14)
@@ -183,7 +184,46 @@ struct SettingsView: View {
                             .stroke(Color(.systemGray5), lineWidth: 1)
                     )
                 }
-
+                
+                
+                
+                // Shortcuts
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("SHORTCUTS")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .tracking(0.5)
+                    
+                    VStack(spacing: 0) {
+                        Link(destination: URL(string: "https://www.icloud.com/shortcuts/49de36f87bf44b21a38056d3c33e41fe")!) {
+                            HStack {
+                                Image(systemName: "bolt.fill")
+                                    .font(.body)
+                                    .foregroundColor(.purple)
+                                    .frame(width: 28)
+                                
+                                Text("Add ByeTunes Shortcut")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                
+                                Spacer()
+                                
+                                Image(systemName: "arrow.up.right")
+                                    .font(.caption)
+                                    .foregroundColor(Color(.systemGray3))
+                            }
+                            .padding(.vertical, 14)
+                            .padding(.horizontal, 16)
+                        }
+                    }
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color(.systemGray5), lineWidth: 1)
+                    )
+                }
                 
                 // Help & Support
                 VStack(alignment: .leading, spacing: 12) {
@@ -238,6 +278,53 @@ struct SettingsView: View {
                             }
                         }
                         .padding()
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("• Artwork Disappeared?")
+                                Text("  Restart the music app to refresh the cache.")
+                                Text("• Song Not Injected?")
+                                Text("  To prevent artwork mix-ups, 'Unknown' songs are skipped in batches. Inject them individually to add them.")
+                            }
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 8)
+                        } label: {
+                            HStack {
+                                Image(systemName: "photo.artframe")
+                                    .foregroundColor(.purple)
+                                Text("Artwork / Missing Songs")
+                                    .foregroundColor(.primary)
+                            }
+                        }
+                        .padding()
+                        
+                        Divider().padding(.leading)
+                        
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("• What is Auto-Inject?")
+                                Text("  When you share audio files to MusicManager from other apps (like Files), they are automatically injected to your device if connected.")
+                                Text("• Supported Music Formats:")
+                                Text("  MP3, M4A, FLAC, WAV, AIFF")
+                                Text("• Supported Ringtone Formats:")
+                                Text("  M4R only (MP3 ringtones must be added manually inside the app)")
+                            }
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 8)
+                        } label: {
+                            HStack {
+                                Image(systemName: "square.and.arrow.down.on.square.fill")
+                                    .foregroundColor(.green)
+                                Text("Auto-Inject")
+                                    .foregroundColor(.primary)
+                            }
+                        }
+                        .padding()
+
+
                     }
                     .background(Color(.systemBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -256,20 +343,68 @@ struct SettingsView: View {
                         .tracking(0.5)
                     
                     VStack(spacing: 0) {
-                        HStack {
-                            Image(systemName: "person.fill")
-                                .font(.body)
-                                .foregroundColor(.primary)
+                        HStack(spacing: 12) {
+                            Image(systemName: "person.crop.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.blue)
                                 .frame(width: 28)
                             
-                            Text("Developer")
-                                .font(.body)
+                            Link("EduAlexxis", destination: URL(string: "https://github.com/EduAlexxis")!)
+                                .font(.body.weight(.medium))
+                                .foregroundColor(.primary)
                             
                             Spacer()
+                        }
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+                        
+                        Divider().padding(.leading, 56)
+                        
+                        HStack(spacing: 12) {
+                            Image(systemName: "person.crop.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.indigo)
+                                .frame(width: 28)
                             
-                            Text("EduAlexxis")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
+                            Link("stossy11", destination: URL(string: "https://github.com/stossy11")!)
+                                .font(.body.weight(.medium))
+                                .foregroundColor(.primary)
+                            
+                            Spacer()
+                        }
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+                        
+                        Divider().padding(.leading, 56)
+                        
+                        HStack(spacing: 12) {
+                            Image(systemName: "paintbrush.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.orange)
+                                .frame(width: 28)
+                            
+                            Text("u/Zephyrax_g14")
+                                .font(.body.weight(.medium))
+                                .foregroundColor(.primary)
+                            
+                            Spacer()
+                        }
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+                        
+                        Divider().padding(.leading, 56)
+                        
+                        HStack(spacing: 12) {
+                            Image(systemName: "hammer.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.gray)
+                                .frame(width: 28)
+                            
+                            Link("jkcoxson", destination: URL(string: "https://github.com/jkcoxson/idevice")!)
+                                .font(.body.weight(.medium))
+                                .foregroundColor(.primary)
+                            
+                            Spacer()
                         }
                         .padding(.vertical, 14)
                         .padding(.horizontal, 16)
@@ -315,11 +450,48 @@ struct SettingsView: View {
                         )
                     }
                 }
+                
+                // Debug Section
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("DEBUG")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .tracking(0.5)
+                    
+                    Button {
+                        NotificationCenter.default.post(name: NSNotification.Name("ShowLogViewer"), object: nil)
+                    } label: {
+                        HStack {
+                            Image(systemName: "terminal.fill")
+                                .font(.body)
+                                .foregroundColor(.gray)
+                                .frame(width: 28)
+                            
+                            Text("View Logs")
+                                .font(.body)
+                                .foregroundColor(.primary)
+                            
+                            Spacer()
+                            
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundColor(Color(.systemGray3))
+                        }
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+                        .background(Color(.systemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color(.systemGray5), lineWidth: 1)
+                        )
+                    }
+                }
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 100)
         }
-        .background(Color(.systemGroupedBackground))
         .sheet(isPresented: $showingPairingPicker) {
             DocumentPicker(types: [.data, .xml, .propertyList, .item]) { url in
                 handlePairingImport(url: url)
@@ -328,9 +500,11 @@ struct SettingsView: View {
         .alert("Delete Library?", isPresented: $showingDeleteAlert) {
             Button("Cancel", role: .cancel) { }
             Button("Delete", role: .destructive) {
-                status = "Deleting library..."
+                // status = "Deleting library..."
                 manager.deleteMediaLibrary { success in
                     DispatchQueue.main.async {
+                        // status = "Ready"
+                        
                         if success {
                            self.showToast(title: "Library Deleted", icon: "trash.circle.fill")
                         } else {

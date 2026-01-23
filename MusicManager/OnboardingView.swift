@@ -28,19 +28,11 @@ struct OnboardingView: View {
                 // Hero Section
                 VStack(spacing: 16) {
                     ZStack {
-                        Circle()
-                            .fill(Color.accentColor.opacity(0.1))
+                        Image("AppIconImage")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
                             .frame(width: 100, height: 100)
-                        
-                        Image(systemName: "music.note.list")
-                            .font(.system(size: 48))
-                            .foregroundStyle(
-                                LinearGradient(
-                                    colors: [.primary, .primary.opacity(0.6)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 24))
                     }
                     .scaleEffect(animateContent ? 1 : 0.8)
                     .opacity(animateContent ? 1 : 0)
@@ -49,7 +41,7 @@ struct OnboardingView: View {
                     .animation(Animation.easeInOut(duration: 2.0).repeatForever(autoreverses: true), value: startPulse)
                     
                     VStack(spacing: 8) {
-                        Text("MusicManager")
+                        Text("ByeTunes")
                             .font(.system(size: 34, weight: .bold, design: .default))
                             .tracking(0.5)
                         
@@ -115,7 +107,7 @@ struct OnboardingView: View {
                             .padding(.vertical, 16)
                             .background(
                                 RoundedRectangle(cornerRadius: 16)
-                                    .fill(Color.primary)
+                                    .fill(Color.accentColor)
                                     .shadow(color: .black.opacity(0.1), radius: 10, x: 0, y: 5)
                             )
                         }

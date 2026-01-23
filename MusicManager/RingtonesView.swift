@@ -34,6 +34,10 @@ struct RingtonesView: View {
     @State private var toastTitle = ""
     @State private var toastIcon = ""
     
+    // Injection count state
+    @State private var currentInjectIndex = 0
+    @State private var totalInjectCount = 0
+    
     // MP3 & M4R Types
     static var supportedTypes: [UTType] {
         let m4r = UTType(filenameExtension: "m4r") ?? .audio
@@ -42,6 +46,9 @@ struct RingtonesView: View {
     
     var body: some View {
         ZStack(alignment: .bottom) {
+            Color(.systemGroupedBackground)
+                .ignoresSafeArea()
+            
             VStack(alignment: .leading, spacing: 10) {
                 // Header
                 VStack(alignment: .leading, spacing: 4) {
@@ -80,7 +87,7 @@ struct RingtonesView: View {
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 16)
-                        .background(Color.black)
+                        .background(Color.accentColor)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     
@@ -106,17 +113,17 @@ struct RingtonesView: View {
                                 HStack {
                                     Spacer()
                                     if isInjecting {
-                                        Text("Injecting...")
+                                        Text("Injecting \(currentInjectIndex)/\(totalInjectCount)")
                                             .font(.body.weight(.medium))
                                     } else {
-                                        Image(systemName: "bell.badge")
+                                        Image(systemName: "arrow.down.to.line")
                                             .font(.body.weight(.medium))
-                                        Text("Inject Ringtones")
+                                        Text("Inject to Device")
                                             .font(.body.weight(.medium))
                                     }
                                     Spacer()
                                 }
-                                .foregroundColor(.black)
+                                .foregroundColor(.primary)
                             }
                         }
                         .frame(height: 50)
@@ -165,56 +172,90 @@ struct RingtonesView: View {
                     }
                     
                     if ringtones.isEmpty {
-                        VStack(spacing: 15) {
+                        VStack(spacing: 20) {
                             Image(systemName: "bell.slash")
-                            .font(.largeTitle)
-                            .foregroundColor(.gray.opacity(0.3))
-                            Text("No ringtones added")
-                            .foregroundColor(.secondary)
+                                .font(.system(size: 48, weight: .light))
+                                .foregroundColor(Color(.systemGray3))
+                                .padding(.top, 20)
+                            
+                            VStack(spacing: 4) {
+                                Text("No ringtones in queue")
+                                    .font(.headline)
+                                    .foregroundColor(.secondary)
+                                
+                                Text("Tap \"Add Ringtones\" to get started")
+                                    .font(.subheadline)
+                                    .foregroundColor(Color(.systemGray))
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("💡 NOTE FOR IOS 26+")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundColor(.secondary)
+                                    .tracking(0.5)
+                                
+                                Text("iOS 26 and above include native ringtone management. You can still use this tool to inject custom tones if you prefer.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary.opacity(0.9))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(16)
+                            .background(Color(.systemGray6).opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .padding(.top, 10)
                         }
                         .frame(maxWidth: .infinity)
-                        .allowsHitTesting(false)
-                        .padding(.top, 40)
+                        .padding(.top, 20)
                     } else {
                         ScrollView {
-                            LazyVStack(spacing: 12) {
-                                ForEach(ringtones) { item in
-                                    HStack {
-                                        Image(systemName: "waveform")
-                                            .font(.title2)
-                                            .foregroundColor(.purple)
-                                            .frame(width: 40, height: 40)
-                                            .background(Color.purple.opacity(0.1))
-                                            .cornerRadius(8)
-                                        
-                                        VStack(alignment: .leading) {
-                                            Text(item.name)
-                                                .font(.body)
-                                                .fontWeight(.medium)
-                                            Text(item.remoteFilename)
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                        }
-                                        
-                                        Spacer()
-                                        
-                                        Button {
-                                            withAnimation {
-                                                ringtones.removeAll { $0.id == item.id }
+                            VStack(spacing: 0) {
+                                ForEach(Array(ringtones.enumerated()), id: \.element.id) { index, item in
+                                    VStack(spacing: 0) {
+                                        HStack {
+                                            Image(systemName: "waveform")
+                                                .font(.title2)
+                                                .foregroundColor(.purple)
+                                                .frame(width: 40, height: 40)
+                                                .background(Color.purple.opacity(0.1))
+                                                .cornerRadius(8)
+                                            
+                                            VStack(alignment: .leading) {
+                                                Text(item.name)
+                                                    .font(.body)
+                                                    .fontWeight(.medium)
+                                                Text(item.remoteFilename)
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
                                             }
-                                        } label: {
-                                            Image(systemName: "xmark.circle.fill")
-                                                .foregroundColor(.gray.opacity(0.5))
+                                            
+                                            Spacer()
+                                            
+                                            Button {
+                                                withAnimation {
+                                                    ringtones.removeAll { $0.id == item.id }
+                                                }
+                                            } label: {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .foregroundColor(.gray.opacity(0.5))
+                                            }
+                                        }
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 12)
+                                        
+                                        if index < ringtones.count - 1 {
+                                            Divider()
+                                                .padding(.leading, 68)
                                         }
                                     }
-                                    .padding(12)
-                                    .background(Color(.systemBackground))
-                                    .cornerRadius(12)
-                                    .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
                                 }
                             }
-                            .padding(.vertical, 4)
                         }
+                        .background(Color(.systemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color(.systemGray5), lineWidth: 1)
+                        )
                     }
                 }
                 
@@ -246,7 +287,6 @@ struct RingtonesView: View {
                 .zIndex(100)
             }
         }
-        .background(Color(.systemGroupedBackground))
         .sheet(isPresented: $showingPicker) {
             DocumentPicker(types: Self.supportedTypes, allowsMultiple: true) { urls in
                 handleImport(urls)
@@ -319,7 +359,27 @@ struct RingtonesView: View {
         guard !ringtones.isEmpty else { return }
         isInjecting = true
         injectProgress = 0
+        totalInjectCount = ringtones.count
+        currentInjectIndex = 0
         
+        // Refresh connection first
+        manager.startHeartbeat { success in
+            guard success else {
+                DispatchQueue.main.async {
+                    self.showToast(title: "Connection Failed", icon: "exclamationmark.triangle.fill")
+                    self.isInjecting = false
+                }
+                return
+            }
+            
+            // Proceed with injection after connection is fresh
+            DispatchQueue.main.async {
+                self.startRingtoneInjection()
+            }
+        }
+    }
+
+    private func startRingtoneInjection() {
         let progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             if self.injectProgress < 0.9 {
                 self.injectProgress += 0.02
@@ -341,8 +401,15 @@ struct RingtonesView: View {
             )
         }
         
-        manager.injectRingtones(ringtones: songs) { progress in
-            // Optional progress
+        manager.injectRingtones(ringtones: songs) { progressText in
+            DispatchQueue.main.async {
+                // Parse progress text to extract current index
+                if let range = progressText.range(of: #"(\d+)/\d+"#, options: .regularExpression),
+                   let index = Int(progressText[range].split(separator: "/").first ?? "") {
+                    self.currentInjectIndex = index
+                    self.injectProgress = CGFloat(index) / CGFloat(self.totalInjectCount) * 0.9
+                }
+            }
         } completion: { success in
             DispatchQueue.main.async {
                 progressTimer.invalidate()

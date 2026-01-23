@@ -25,6 +25,10 @@ struct MusicView: View {
     @State private var showToast = false
     @State private var toastTitle = ""
     @State private var toastIcon = ""
+    
+    // Injection count state
+    @State private var currentInjectIndex = 0
+    @State private var totalInjectCount = 0
 
     
     static var supportedAudioTypes: [UTType] {
@@ -36,6 +40,9 @@ struct MusicView: View {
     
     var body: some View {
         ZStack(alignment: .bottom) {
+            Color(.systemGroupedBackground)
+                .ignoresSafeArea()
+            
             // ScrollView removed to disable page scrolling
             VStack(alignment: .leading, spacing: 10) {
                 // Header
@@ -76,7 +83,7 @@ struct MusicView: View {
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 16)
-                        .background(Color.black)
+                        .background(Color.accentColor)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     
@@ -102,7 +109,7 @@ struct MusicView: View {
                                 HStack {
                                     Spacer()
                                     if isInjecting {
-                                        Text("Injecting...")
+                                        Text("Injecting \(currentInjectIndex)/\(totalInjectCount)")
                                             .font(.body.weight(.medium))
                                     } else {
                                         Image(systemName: "arrow.down.to.line")
@@ -112,7 +119,7 @@ struct MusicView: View {
                                     }
                                     Spacer()
                                 }
-                                .foregroundColor(.black)
+                                .foregroundColor(.primary)
                             }
                         }
                         .frame(height: 50)
@@ -144,7 +151,7 @@ struct MusicView: View {
                             Text(isFetchingPlaylists ? "Fetching..." : "Inject as Playlist")
                                 .font(.body.weight(.medium))
                         }
-                        .foregroundColor(.black)
+                        .foregroundColor(.primary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 16)
                         .background(Color(.systemGray6))
@@ -240,14 +247,7 @@ struct MusicView: View {
                 }
                 
 
-                // Status message (only show action-related status, not connection status)
-                if !status.isEmpty && status != "Ready" && status != "Connected!" && status != "Connection failed" && status != "⚠️ IMPORTANT: Ensure Music App is closed!" {
-                    Text(status)
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 8)
-                }
+                // Status message removed (using Toasts now)
                 // Removed extra brace here
                 
                 Spacer() // Push content to top
@@ -283,7 +283,6 @@ struct MusicView: View {
     } // Close ZStack here
     // Brace removed to continue modifier chain
 
-        .background(Color(.systemGroupedBackground))
         .sheet(isPresented: $showingMusicPicker) {
             DocumentPicker(types: Self.supportedAudioTypes, allowsMultiple: true) { urls in
                 handleMusicImport(urls: urls)
@@ -411,7 +410,7 @@ struct MusicView: View {
                 .padding(20)
             }
         }
-        .background(Color(.systemGroupedBackground))
+        .background(Color(.systemGroupedBackground).ignoresSafeArea())
     }
     
     func handleMusicImport(urls: [URL]?) {
@@ -450,8 +449,27 @@ struct MusicView: View {
         
         isInjecting = true
         injectProgress = 0
-        // status = "Starting injection..."
+        totalInjectCount = songs.count
+        currentInjectIndex = 0
         
+        // Refresh connection first
+        manager.startHeartbeat { success in
+            guard success else {
+                DispatchQueue.main.async {
+                    self.showToast(title: "Connection Failed", icon: "exclamationmark.triangle.fill")
+                    self.isInjecting = false
+                }
+                return
+            }
+            
+            // Proceed with injection after connection is fresh
+            DispatchQueue.main.async {
+                self.startInjectionProcess()
+            }
+        }
+    }
+    
+    private func startInjectionProcess() {
         // Simulate progress animation
         let progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             if self.injectProgress < 0.9 {
@@ -461,7 +479,13 @@ struct MusicView: View {
         
         manager.injectSongs(songs: songs, progress: { progressText in
             DispatchQueue.main.async {
-                // self.status = progressText
+                // Parse progress text like "Injecting song 3/10" to extract current index
+                if let range = progressText.range(of: #"(\d+)/\d+"#, options: .regularExpression),
+                   let index = Int(progressText[range].split(separator: "/").first ?? "") {
+                    self.currentInjectIndex = index
+                    // Update progress bar based on actual count
+                    self.injectProgress = CGFloat(index) / CGFloat(self.totalInjectCount) * 0.9
+                }
             }
         }) { success in
             DispatchQueue.main.async {
@@ -518,8 +542,24 @@ struct MusicView: View {
         isInjecting = true
         injectProgress = 0
         let displayParams = name ?? "Existing Playlist"
-        // status = "Updating playlist..."
         
+        // Refresh connection first
+        manager.startHeartbeat { success in
+            guard success else {
+                DispatchQueue.main.async {
+                    self.showToast(title: "Connection Failed", icon: "exclamationmark.triangle.fill")
+                    self.isInjecting = false
+                }
+                return
+            }
+             
+            DispatchQueue.main.async {
+                self.startPlaylistInjection(name: name, pid: pid)
+            }
+        }
+    }
+
+    private func startPlaylistInjection(name: String?, pid: Int64?) {
         let progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             if self.injectProgress < 0.9 {
                 self.injectProgress += 0.02

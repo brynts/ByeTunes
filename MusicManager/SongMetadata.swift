@@ -9,16 +9,18 @@ struct SongMetadata: Identifiable {
     var title: String
     var artist: String
     var album: String
+    var albumArtist: String?
     var genre: String
     var year: Int
     var durationMs: Int
     var fileSize: Int
-    
-    /// Filename remoto en el device
     var remoteFilename: String
-    
-    /// Artwork data sacada del MP3 (JPEG o PNG)
     var artworkData: Data?
+    
+    var trackNumber: Int?
+    var trackCount: Int?
+    var discNumber: Int?
+    var discCount: Int?
     
     /// Artwork token pa referencia en la database
     var artworkToken: String {
@@ -26,7 +28,6 @@ struct SongMetadata: Identifiable {
     }
     
     /// Generar un filename random de 4 chars tipo iTunes
-    /// Preserves given extension (e.g. "mp3", "flac"). Defaults to "mp3".
     static func generateRemoteFilename(withExtension ext: String? = nil) -> String {
         let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         let randomName = String((0..<4).map { _ in letters.randomElement()! })
@@ -55,10 +56,10 @@ struct SongMetadata: Identifiable {
         }
         return Data(result)
     }
-    
+
     /// Extract metadata from an MP3 file using AVFoundation
     static func fromURL(_ url: URL) async throws -> SongMetadata {
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url)
         
         // Get duration
         let duration = try await asset.load(.duration)
@@ -72,9 +73,15 @@ struct SongMetadata: Identifiable {
         var title = filenameWithoutExt
         var artist = "Unknown Artist"
         var album = "Unknown Album"
+        var albumArtist: String?
         var genre = "Unknown Genre"
         var year = Calendar.current.component(.year, from: Date())
         var artworkData: Data?
+        
+        var trackNumber: Int?
+        var trackCount: Int?
+        var discNumber: Int?
+        var discCount: Int?
         
         // Try to parse "Title - Artist" or "Artist - Title" from filename
         if filenameWithoutExt.contains(" - ") {
@@ -119,69 +126,123 @@ struct SongMetadata: Identifiable {
                     artworkData = data
                     print("[SongMetadata] Extracted artwork: \(data.count) bytes")
                 }
-            default:
-                break
+            default: break
             }
         }
         
-        // For FLAC/Vorbis: Try loading ALL metadata if common metadata was incomplete
-        // Also check if title looks like a UUID (sandbox file naming on iOS)
-        let titleLooksLikeUUID = title.contains("-") && title.count > 36
-        if artist == "Unknown Artist" || album == "Unknown Album" || titleLooksLikeUUID {
-            let allMetadata = try await asset.load(.metadata)
-            print("[SongMetadata] Checking \(allMetadata.count) format-specific metadata items for FLAC")
+        // DEEP SCAN: Load ALL metadata formats to find Track/Disc numbers (ID3 'TRCK', iTunes 'trkn', Vorbis 'TRACKNUMBER')
+        let allMetadata = try await asset.load(.metadata)
+        // print("[SongMetadata] Scanning \(allMetadata.count) items for Track/Disc info...")
+        
+        for item in allMetadata {
+            // Get key as String (could be "TRCK", "trkn", "TRACKNUMBER", etc.)
+            var keyString = ""
+            if let strKey = item.key as? String {
+                keyString = strKey
+            } else if let intKey = item.key as? Int {
+                // ID3v2.3 tags sometimes come as Int codes? Rarely. Usually String identifiers.
+                // But AVMetadataItem.identifier is more reliable.
+                keyString = "\(intKey)"
+            }
             
-            for item in allMetadata {
-                // Try multiple ways to get the key
-                let identifierKey = item.identifier?.rawValue.uppercased() ?? ""
-                let keyValue = (item.key as? String)?.uppercased() ?? ""
-                let combinedKey = identifierKey + "|" + keyValue
+            let identifier = item.identifier?.rawValue ?? ""
+            let combined = "\(identifier)|\(keyString)".uppercased()
+            
+            // print("[SongMetadata] Key: \(combined)") // Uncomment to debug
+            
+            // TRACK NUMBER
+            if trackNumber == nil {
+                if combined.contains("TRCK") || combined.contains("TRACK") || combined.contains("TRKN") || keyString.lowercased() == "trkn" {
+                    // Try parsing as String "1/12"
+                    if let stringVal = try? await item.load(.stringValue) {
+                        let components = stringVal.components(separatedBy: "/")
+                        if let t = Int(components[0]) { trackNumber = t }
+                        if components.count > 1, let tc = Int(components[1]) { trackCount = tc }
+                    }
+                    // Try parsing as binary data (iTunes 'trkn' atom: 8 bytes)
+                    else if let dataVal = try? await item.load(.dataValue), dataVal.count >= 8 {
+                        // Bytes 2-3 = Track Num, 4-5 = Track Count (Big Endian)
+                        let track = dataVal.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self).bigEndian }
+                        let total = dataVal.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt16.self).bigEndian }
+                        if track > 0 { trackNumber = Int(track) }
+                        if total > 0 { trackCount = Int(total) }
+                    }
+                }
+            }
+            
+            // DISC NUMBER
+            if discNumber == nil {
+                if combined.contains("TPOS") || combined.contains("DISC") || combined.contains("DISK") || keyString.lowercased() == "disk" {
+                     if let stringVal = try? await item.load(.stringValue) {
+                        let components = stringVal.components(separatedBy: "/")
+                        if let d = Int(components[0]) { discNumber = d }
+                        if components.count > 1, let dc = Int(components[1]) { discCount = dc }
+                     } else if let dataVal = try? await item.load(.dataValue), dataVal.count >= 6 { // 'disk' usually 6 bytes? or 8?
+                         // Assuming similar structure to trkn
+                         let disc = dataVal.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self).bigEndian }
+                         let total = dataVal.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt16.self).bigEndian }
+                         if disc > 0 { discNumber = Int(disc) }
+                         if total > 0 { discCount = Int(total) }
+                     }
+                }
+            }
+
+            // ARTWORK (Deep Scan / FLAC Fallback)
+            if artworkData == nil {
+                // Check keys that indicate artwork
+                if combined.contains("ARTWORK") || combined.contains("PICTURE") || combined.contains("APIC") || combined.contains("COVR") {
+                    if let data = try? await item.load(.dataValue), !data.isEmpty {
+                        artworkData = data
+                        print("[SongMetadata] Deep Scan extracted artwork: \(data.count) bytes (Key: \(combined))")
+                    }
+                }
+            }
+
+            // FLAC Vorbis Comments specific check (TITLE, ARTIST keys) if still unknown
+            // This is moved here to ensure it runs after common metadata but before final fallback.
+            // It also uses the `allMetadata` array.
+            if let val = try? await item.load(.stringValue), !val.isEmpty {
+                if (combined.contains("TITLE") || combined.contains("NAM")) && title == filenameWithoutExt { title = val }
+                if (combined.contains("ARTIST") || combined.contains("PERFORMER")) && !combined.contains("ALBUMARTIST") && artist == "Unknown Artist" { artist = val }
+                if combined.contains("ALBUM") && !combined.contains("ALBUMARTIST") && album == "Unknown Album" { album = val }
+                if (combined.contains("GENRE") || combined.contains("GEN")) && genre == "Unknown Genre" { genre = val }
                 
-                // Get the value for debugging
-                let stringValue = try? await item.load(.stringValue)
-                print("[SongMetadata] Key: \(combinedKey) = \(stringValue ?? "nil")")
-                
-                // Match by key or identifier containing the tag name
-                if combinedKey.contains("TITLE") {
-                    if let value = stringValue, !value.isEmpty {
-                        title = value
-                        print("[SongMetadata] ✓ Found title: \(value)")
-                    }
-                } else if combinedKey.contains("ARTIST") && !combinedKey.contains("ALBUMARTIST") {
-                    if let value = stringValue, !value.isEmpty {
-                        artist = value
-                        print("[SongMetadata] ✓ Found artist: \(value)")
-                    }
-                } else if combinedKey.contains("ALBUM") && !combinedKey.contains("ALBUMARTIST") {
-                    if let value = stringValue, !value.isEmpty {
-                        album = value
-                        print("[SongMetadata] ✓ Found album: \(value)")
-                    }
-                } else if combinedKey.contains("GENRE") {
-                    if let value = stringValue, !value.isEmpty {
-                        genre = value
-                    }
-                } else if combinedKey.contains("DATE") || combinedKey.contains("YEAR") {
-                    if let value = stringValue, let yearInt = Int(value.prefix(4)) {
-                        year = yearInt
+                // Album Artist
+                if (combined.contains("ALBUMARTIST") || combined.contains("TPE2") || combined.contains("AART")) {
+                   albumArtist = val
+                }
+
+                // Year extraction: check for DATE, YEAR, TYER (ID3v2.3), TDRC (ID3v2.4), ©day (iTunes/M4A)
+                if year == Calendar.current.component(.year, from: Date()) {
+                    if combined.contains("DATE") || combined.contains("YEAR") || combined.contains("TYER") || combined.contains("TDRC") || combined.contains("DAY") {
+                        // Try to extract 4-digit year from the value (could be "2019", "2019-05-21", etc.)
+                        if let yearInt = Int(val.prefix(4)), yearInt >= 1000 && yearInt <= 2100 {
+                            year = yearInt
+                            print("[SongMetadata] Extracted year: \(year) from key: \(combined)")
+                        }
                     }
                 }
             }
         }
         
-        print("[SongMetadata] Final: title=\(title), artist=\(artist), album=\(album)")
+        print("[SongMetadata] Final: title=\(title), artist=\(artist), album=\(album), track=\(trackNumber ?? 0)/\(trackCount ?? 0)")
         
         return SongMetadata(
             localURL: url,
             title: title,
             artist: artist,
             album: album,
+            albumArtist: albumArtist,
             genre: genre,
             year: year,
             durationMs: durationMs,
             fileSize: fileSize,
             remoteFilename: generateRemoteFilename(withExtension: url.pathExtension),
-            artworkData: artworkData
+            artworkData: artworkData,
+            trackNumber: trackNumber,
+            trackCount: trackCount,
+            discNumber: discNumber,
+            discCount: discCount
         )
     }
 }

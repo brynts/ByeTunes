@@ -108,8 +108,8 @@ class MediaLibraryBuilder {
     }
     
     /// Create a new database with the songs - RENAMED TO v104 TO FORCE REBUILD
-    static func createDatabase_v104(songs: [SongMetadata], playlistName: String? = nil) throws -> (dbURL: URL, artworkInfo: [ArtworkInfo]) {
-        print("[MediaLibraryBuilder] ====== createDatabase_v104 CALLED ======")
+    static func createDatabase_v104(songs: [SongMetadata], playlistName: String? = nil) throws -> (dbURL: URL, artworkInfo: [ArtworkInfo], pids: [Int64]) {
+        Logger.shared.log("[MediaLibraryBuilder] ====== createDatabase_v104 CALLED ======")
         let fileManager = FileManager.default
         let tempDir = fileManager.temporaryDirectory
         let dbPath = tempDir.appendingPathComponent("MediaLibrary.sqlitedb")
@@ -146,10 +146,10 @@ class MediaLibraryBuilder {
             try createPlaylist(db: db, playlistName: playlistName, songPids: songPids)
         }
         
-        print("[MediaLibraryBuilder] Database creada: \(dbPath.path)")
-        // print("[MediaLibraryBuilder] Size: \((try? FileManager.default.attributesOfItem(atPath: dbPath.path)[.size]) ?? 0) bytes")
+        Logger.shared.log("[MediaLibraryBuilder] Database creada: \(dbPath.path)")
+        // Logger.shared.log("[MediaLibraryBuilder] Size: \((try? FileManager.default.attributesOfItem(atPath: dbPath.path)[.size]) ?? 0) bytes")
         
-        return (dbPath, artworkInfo)
+        return (dbPath, artworkInfo, songPids)
     }
     
     /// Agrega rolas a una database de MediaLibrary que ya exista
@@ -162,8 +162,9 @@ class MediaLibraryBuilder {
         shmData: Data? = nil,
         newSongs: [SongMetadata],
         playlistName: String? = nil,
-        targetPlaylistPid: Int64? = nil
-    ) throws -> (dbURL: URL, existingFiles: Set<String>, artworkInfo: [ArtworkInfo]) {
+        targetPlaylistPid: Int64? = nil,
+        existingOnDeviceFiles: Set<String>? = nil
+    ) throws -> (dbURL: URL, existingFiles: Set<String>, artworkInfo: [ArtworkInfo], pids: [Int64]) {
         let tempDir = FileManager.default.temporaryDirectory
         let dbPath = tempDir.appendingPathComponent("MediaLibrary.sqlitedb")
         
@@ -189,9 +190,48 @@ class MediaLibraryBuilder {
         }
         defer { sqlite3_close(db) }
         
+        // CRITICAL: Checkpoint WAL FIRST to merge any pending iOS changes (like song deletions)
+        // This ensures we're working with a fully consistent database state
+        if walData != nil {
+            Logger.shared.log("[MediaLibraryBuilder] Checkpointing WAL to apply iOS changes...")
+            var errorMsg: UnsafeMutablePointer<CChar>?
+            let checkpointResult = sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, &errorMsg)
+            if checkpointResult != SQLITE_OK {
+                if let msg = errorMsg {
+                    Logger.shared.log("[MediaLibraryBuilder] Checkpoint warning: \(String(cString: msg))")
+                    sqlite3_free(errorMsg)
+                }
+            } else {
+                Logger.shared.log("[MediaLibraryBuilder] WAL checkpoint successful - iOS changes applied")
+            }
+        }
+        
+        // Run integrity check to verify database is usable
+        var integrityStmt: OpaquePointer?
+        var integrityOK = false
+        if sqlite3_prepare_v2(db, "PRAGMA quick_check", -1, &integrityStmt, nil) == SQLITE_OK {
+            if sqlite3_step(integrityStmt) == SQLITE_ROW {
+                if let resultText = sqlite3_column_text(integrityStmt, 0) {
+                    integrityOK = String(cString: resultText) == "ok"
+                    Logger.shared.log("[MediaLibraryBuilder] Database integrity check: \(integrityOK ? "PASSED" : "FAILED")")
+                }
+            }
+        }
+        sqlite3_finalize(integrityStmt)
+        
+        if !integrityOK {
+            Logger.shared.log("[MediaLibraryBuilder] WARNING: Database integrity check failed, but continuing...")
+        }
+        
+        // CLEANUP GHOST RECORDS
+        // If we know what files are actually on the device, we can delete DB records that point to nothing.
+        if let onDeviceFiles = existingOnDeviceFiles {
+            cleanupGhostRecords(db: db, existingOnDeviceFiles: onDeviceFiles)
+        }
+        
         // Checar filenames existentes pa no re-uploadear
         let existingFiles = getExistingFilenames(db: db)
-        print("[MediaLibraryBuilder] Found \(existingFiles.count) existing songs in database")
+        Logger.shared.log("[MediaLibraryBuilder] Found \(existingFiles.count) existing songs in database")
         
         // Get existing entities to avoid duplicates
         let existingArtists = getExistingArtists(db: db)
@@ -218,17 +258,20 @@ class MediaLibraryBuilder {
             try createPlaylist(db: db, playlistName: playlistName, songPids: songPids)
         }
         
-        if let _ = walData {
-            var errorMsg: UnsafeMutablePointer<CChar>?
-            sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, &errorMsg)
-            if let msg = errorMsg {
-                print("[MediaLibraryBuilder] Checkpoint warning: \(String(cString: msg))")
-                sqlite3_free(errorMsg)
-            }
+        // Final checkpoint to ensure all changes are written to the main DB file
+        // We use DELETE mode to remove WAL/SHM files for cleaner upload
+        var errorMsg: UnsafeMutablePointer<CChar>?
+        sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, &errorMsg)
+        if let msg = errorMsg {
+            Logger.shared.log("[MediaLibraryBuilder] Final checkpoint warning: \(String(cString: msg))")
+            sqlite3_free(errorMsg)
         }
         
-        print("[MediaLibraryBuilder] Merged database saved: \(dbPath.path)")
-        return (dbPath, existingFiles, artworkInfo)
+        // Switch to DELETE journal mode for the final file (cleaner for upload)
+        sqlite3_exec(db, "PRAGMA journal_mode=DELETE", nil, nil, nil)
+        
+        Logger.shared.log("[MediaLibraryBuilder] Merged database saved: \(dbPath.path)")
+        return (dbPath, existingFiles, artworkInfo, songPids)
     }
     
     /// Agarrar los filenames que ya existen en la base
@@ -246,6 +289,62 @@ class MediaLibraryBuilder {
         sqlite3_finalize(stmt)
         
         return filenames
+    }
+    
+    /// Remove database records that point to files that do not exist on the device
+    private static func cleanupGhostRecords(db: OpaquePointer?, existingOnDeviceFiles: Set<String>) {
+        Logger.shared.log("[MediaLibraryBuilder] Starting Ghost Record Cleanup...")
+        var pidsToDelete: [Int64] = []
+        var stmt: OpaquePointer?
+        
+        // Only check items with base_location_id = 3840 (Synched media) to avoid touching Cloud/System items
+        // Join with item_extra to get the filename (location)
+        let query = """
+            SELECT item.item_pid, item_extra.location 
+            FROM item 
+            JOIN item_extra ON item.item_pid = item_extra.item_pid 
+            WHERE item.base_location_id = 3840
+        """
+        
+        if sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let pid = sqlite3_column_int64(stmt, 0)
+                if let locPtr = sqlite3_column_text(stmt, 1) {
+                    let location = String(cString: locPtr)
+                    let filename = (location as NSString).lastPathComponent
+                    
+                    // If the file mentioned in DB is NOT in the list of actual files -> DELETE IT
+                    if !location.isEmpty && !existingOnDeviceFiles.contains(filename) {
+                        Logger.shared.log("[MediaLibraryBuilder] Found GHOST record: PID \(pid), file '\(filename)' missing from device")
+                        pidsToDelete.append(pid)
+                    }
+                }
+            }
+        }
+        sqlite3_finalize(stmt)
+        
+        if pidsToDelete.isEmpty {
+            Logger.shared.log("[MediaLibraryBuilder] No ghost records found.")
+            return
+        }
+        
+        Logger.shared.log("[MediaLibraryBuilder] Deleting \(pidsToDelete.count) ghost records...")
+        
+        for pid in pidsToDelete {
+            // Delete from all relevant tables
+            try? executeSQL(db, "DELETE FROM item WHERE item_pid=\(pid)")
+            try? executeSQL(db, "DELETE FROM item_extra WHERE item_pid=\(pid)")
+            try? executeSQL(db, "DELETE FROM item_playback WHERE item_pid=\(pid)")
+            try? executeSQL(db, "DELETE FROM item_stats WHERE item_pid=\(pid)")
+            try? executeSQL(db, "DELETE FROM item_store WHERE item_pid=\(pid)")
+            try? executeSQL(db, "DELETE FROM item_video WHERE item_pid=\(pid)")
+            try? executeSQL(db, "DELETE FROM item_search WHERE item_pid=\(pid)")
+            try? executeSQL(db, "DELETE FROM lyrics WHERE item_pid=\(pid)")
+            try? executeSQL(db, "DELETE FROM chapter WHERE item_pid=\(pid)")
+            
+            // Note: We leave artwork tokens as they might be shared or hard to cleanup without orphaned checks
+            // But usually item deletion is enough to hide it from UI.
+        }
     }
     
     /// Get existing artists from database
@@ -324,6 +423,44 @@ class MediaLibraryBuilder {
         return albumArtists
     }
     
+    /// Get existing song signatures for duplicate detection
+    private static func getExistingSongSignatures(db: OpaquePointer?) -> [String: Int64] {
+        var signatures: [String: Int64] = [:]
+        var stmt: OpaquePointer?
+        
+        // Join tables to get Title, Artist, Album for each song
+        let query = """
+            SELECT item.item_pid, item_extra.title, item_artist.item_artist, album.album 
+            FROM item 
+            LEFT JOIN item_extra ON item.item_pid = item_extra.item_pid 
+            LEFT JOIN item_artist ON item.item_artist_pid = item_artist.item_artist_pid 
+            LEFT JOIN album ON item.album_pid = album.album_pid
+            WHERE item.media_type = 8
+        """
+        
+        if sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let pid = sqlite3_column_int64(stmt, 0)
+                
+                let titlePtr = sqlite3_column_text(stmt, 1)
+                let artistPtr = sqlite3_column_text(stmt, 2)
+                let albumPtr = sqlite3_column_text(stmt, 3)
+                
+                let title = titlePtr != nil ? String(cString: titlePtr!) : ""
+                let artist = artistPtr != nil ? String(cString: artistPtr!) : ""
+                let album = albumPtr != nil ? String(cString: albumPtr!) : ""
+                
+                if !title.isEmpty {
+                    let signature = "\(title)|\(artist)|\(album)"
+                    signatures[signature] = pid
+                }
+            }
+        }
+        sqlite3_finalize(stmt)
+        return signatures
+    }
+
+    
 
     /// Insert songs while reusing existing entities
     @discardableResult
@@ -337,10 +474,10 @@ class MediaLibraryBuilder {
     ) throws -> (pids: [Int64], artworkInfo: [ArtworkInfo]) {
         let now = Int(Date().timeIntervalSince1970)
         
-        // Get max track number
+        // Get max track count (for sequential artwork tokens)
         var maxTrackNum = 0
         var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT MAX(track_number) FROM item", -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM item", -1, &stmt, nil) == SQLITE_OK {
             if sqlite3_step(stmt) == SQLITE_ROW {
                 maxTrackNum = Int(sqlite3_column_int(stmt, 0))
             }
@@ -373,8 +510,23 @@ class MediaLibraryBuilder {
         var insertedPids: [Int64] = []
         var collectedArtworkInfo: [ArtworkInfo] = []
         
+        // Detect existing songs to reuse PIDs (Ghost Song Fix)
+        // Map "Title|Artist|Album" -> PID
+        let existingSignatures = getExistingSongSignatures(db: db)
+        Logger.shared.log("[MediaLibraryBuilder] Found \(existingSignatures.count) existing song signatures for duplicate checking")
+        
         for song in songs {
-            let itemPid = SongMetadata.generatePersistentId()
+            // Check if song already exists
+            let signature = "\(song.title)|\(song.artist)|\(song.album)"
+            
+            let itemPid: Int64
+            if let existingPid = existingSignatures[signature] {
+                itemPid = existingPid
+                Logger.shared.log("[MediaLibraryBuilder] Resurrecting existing song PID \(itemPid): \(song.title)")
+            } else {
+                itemPid = SongMetadata.generatePersistentId()
+            }
+            
             insertedPids.append(itemPid)
             
             // Get or create artist - track first item as representative for NEW entities
@@ -389,15 +541,17 @@ class MediaLibraryBuilder {
                 artistPid = newPid
             }
             
-            // Get or create album artist - track first item as representative for NEW entities
+            // Get or create album artist - use explicitly parsed Album Artist, or fallback to Artist
+            // This fixes issues where Album Artist (e.g. "JACKBOYS") differs from Track Artist (e.g. "Travis Scott...")
+            let effectiveAlbumArtistName = song.albumArtist ?? song.artist
             let albumArtistPid: Int64
-            if let existing = albumArtists[song.artist] {
+            if let existing = albumArtists[effectiveAlbumArtistName] {
                 albumArtistPid = existing
             } else {
                 let newPid = SongMetadata.generatePersistentId()
-                albumArtists[song.artist] = newPid
-                newAlbumArtists[song.artist] = newPid
-                albumArtistRepItem[song.artist] = itemPid  // First song for this NEW album artist
+                albumArtists[effectiveAlbumArtistName] = newPid
+                newAlbumArtists[effectiveAlbumArtistName] = newPid
+                albumArtistRepItem[effectiveAlbumArtistName] = itemPid  // First song for this NEW album artist
                 albumArtistPid = newPid
             }
             
@@ -430,12 +584,20 @@ class MediaLibraryBuilder {
             let artistOrder = insertSortMap(db: db, name: song.artist)
             let albumOrder = insertSortMap(db: db, name: song.album)
             let genreOrder = insertSortMap(db: db, name: song.genre)
+            // Ensure Album Artist is also in sort map
+             _ = insertSortMap(db: db, name: effectiveAlbumArtistName)
             
-            print("[MediaLibraryBuilder] Merging: \(song.title) -> \(song.remoteFilename)")
+            Logger.shared.log("[MediaLibraryBuilder] Merging: \(song.title) -> \(song.remoteFilename)")
             
-            // INSERT into item table
+            // Resolve metadata with fallbacks
+            let dbTrackNum = song.trackNumber ?? trackNum
+            let dbTrackCount = song.trackCount ?? 1
+            let dbDiscNum = song.discNumber ?? 1
+            let dbDiscCount = song.discCount ?? 1
+            
+            // INSERT into item table using INSERT OR REPLACE to handle PID reuse (resurrection)
             try executeSQL(db, """
-                INSERT INTO item (
+                INSERT OR REPLACE INTO item (
                     item_pid, media_type, title_order, title_order_section,
                     item_artist_pid, item_artist_order, item_artist_order_section,
                     series_name_order, series_name_order_section,
@@ -455,7 +617,7 @@ class MediaLibraryBuilder {
                     \(albumArtistPid), \(artistOrder), 1,
                     0, 0, 27,
                     \(genreId), \(genreOrder), 1,
-                    1, \(trackNum), 1,
+                    \(dbDiscNum), \(dbTrackNum), 1,
                     3840, 0,
                     0, 1, 2, 0, 0,
                     1, 0, \(now), 0, 0, \(now), 0
@@ -466,13 +628,13 @@ class MediaLibraryBuilder {
             let escapedTitle = song.title.replacingOccurrences(of: "'", with: "''")
             let escapedFilename = song.remoteFilename.replacingOccurrences(of: "'", with: "''")
             try executeSQL(db, """
-                INSERT INTO item_extra (
+                INSERT OR REPLACE INTO item_extra (
                     item_pid, title, sort_title, disc_count, track_count, total_time_ms, year,
                     location, file_size, integrity, is_audible_audio_book, date_modified,
                     media_kind, content_rating, content_rating_level, is_user_disabled, bpm, genius_id,
                     location_kind_id
                 ) VALUES (
-                    \(itemPid), '\(escapedTitle)', '\(escapedTitle)', 1, 1, \(song.durationMs), \(song.year),
+                    \(itemPid), '\(escapedTitle)', '\(escapedTitle)', \(dbDiscCount), \(dbTrackCount), \(song.durationMs), \(song.year),
                     '\(escapedFilename)', \(song.fileSize), \(MediaLibraryBuilder.generateIntegrityHex(filename: song.remoteFilename)), 0, \(now),
                     1, 0, 0, 0, 0, 0,
                     42
@@ -482,7 +644,7 @@ class MediaLibraryBuilder {
             // INSERT into item_playback
             let audioFmt = audioFormatForExtension(URL(fileURLWithPath: song.remoteFilename).pathExtension)
             try executeSQL(db, """
-                INSERT INTO item_playback (
+                INSERT OR REPLACE INTO item_playback (
                     item_pid, audio_format, bit_rate, codec_type, codec_subtype, data_kind,
                     duration, has_video, relative_volume, sample_rate
                 ) VALUES (
@@ -492,27 +654,27 @@ class MediaLibraryBuilder {
             """)
             
             // INSERT into item_stats
-            try executeSQL(db, "INSERT INTO item_stats (item_pid, date_accessed) VALUES (\(itemPid), \(now))")
+            try executeSQL(db, "INSERT OR REPLACE INTO item_stats (item_pid, date_accessed) VALUES (\(itemPid), \(now))")
             
             // INSERT into item_store
             // Re-enabling as disabling it caused 'Ghost Albums' (Songs hidden)
             let syncId = SongMetadata.generatePersistentId()
-            try executeSQL(db, "INSERT INTO item_store (item_pid, sync_id, sync_in_my_library) VALUES (\(itemPid), \(syncId), 1)")
+            try executeSQL(db, "INSERT OR REPLACE INTO item_store (item_pid, sync_id, sync_in_my_library) VALUES (\(itemPid), \(syncId), 1)")
             
             // INSERT into item_video
-            try executeSQL(db, "INSERT INTO item_video (item_pid) VALUES (\(itemPid))")
+            try executeSQL(db, "INSERT OR REPLACE INTO item_video (item_pid) VALUES (\(itemPid))")
             
             // INSERT into item_search
             try executeSQL(db, """
-                INSERT INTO item_search (item_pid, search_title, search_album, search_artist, search_composer, search_album_artist)
+                INSERT OR REPLACE INTO item_search (item_pid, search_title, search_album, search_artist, search_composer, search_album_artist)
                 VALUES (\(itemPid), \(titleOrder), \(albumOrder), \(artistOrder), 0, \(artistOrder))
             """)
             
             // INSERT into lyrics
-            try executeSQL(db, "INSERT INTO lyrics (item_pid) VALUES (\(itemPid))")
+            try executeSQL(db, "INSERT OR REPLACE INTO lyrics (item_pid) VALUES (\(itemPid))")
             
             // INSERT into chapter
-            try executeSQL(db, "INSERT INTO chapter (item_pid) VALUES (\(itemPid))")
+            try executeSQL(db, "INSERT OR REPLACE INTO chapter (item_pid) VALUES (\(itemPid))")
             
             // ARTWORK DATABASE with CORRECT HASH ALGORITHM
             // iOS computes artwork path as SHA1(artwork_token), NOT SHA1(image_data)!
@@ -552,51 +714,51 @@ class MediaLibraryBuilder {
                 {"ColorAnalysis":{"1":{"primaryTextColorLight":"NO","secondaryTextColorLight":"NO","secondaryTextColor":"#FFFFFF","tertiaryTextColorLight":"NO","primaryTextColor":"#FFFFFF","tertiaryTextColor":"#CCCCCC","backgroundColorLight":"NO","backgroundColor":"#333333"}}}
                 """
                 try executeSQL(db, """
-                    INSERT INTO artwork (
+                    INSERT OR REPLACE INTO artwork (
                         artwork_token, artwork_source_type, relative_path, artwork_type, 
                         interest_data, artwork_variant_type
                     ) VALUES (
-                        '\(artToken)', 300, '\(relativePath)', 1,
+                        '\(artToken)', 1, '\(relativePath)', 1,
                         '\(colorAnalysis)', 0
                     )
                 """)
                 
                 // 2. Insert into artwork_token table (link to item, album, artist)
                 try executeSQL(db, """
-                    INSERT INTO artwork_token (
+                    INSERT OR REPLACE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
                     ) VALUES (
-                        '\(artToken)', 300, 1, \(itemPid), 0, 0
+                        '\(artToken)', 1, 1, \(itemPid), 0, 0
                     )
                 """)
                 // entity_type=1 for album table reference
                 try executeSQL(db, """
-                    INSERT OR IGNORE INTO artwork_token (
+                    INSERT OR REPLACE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
                     ) VALUES (
-                        '\(artToken)', 300, 1, \(albumPid), 1, 0
+                        '\(artToken)', 1, 1, \(albumPid), 1, 0
                     )
                 """)
                 // entity_type=4 for album artwork in library view (iOS uses this!)
                 try executeSQL(db, """
-                    INSERT OR IGNORE INTO artwork_token (
+                    INSERT OR REPLACE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
                     ) VALUES (
-                        '\(artToken)', 300, 1, \(albumPid), 4, 0
+                        '\(artToken)', 1, 1, \(albumPid), 4, 0
                     )
                 """)
                 try executeSQL(db, """
-                    INSERT OR IGNORE INTO artwork_token (
+                    INSERT OR REPLACE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
                     ) VALUES (
-                        '\(artToken)', 300, 1, \(artistPid), 2, 0
+                        '\(artToken)', 1, 1, \(artistPid), 2, 0
                     )
                 """)
                 
                 // 3. Insert into best_artwork_token table
                 // fetchable_artwork_token should be EMPTY for local artwork (not fetched remotely)
                 try executeSQL(db, """
-                    INSERT INTO best_artwork_token (
+                    INSERT OR REPLACE INTO best_artwork_token (
                         entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
                         fetchable_artwork_source_type, artwork_variant_type
                     ) VALUES (
@@ -606,7 +768,7 @@ class MediaLibraryBuilder {
                 if !processedAlbumArtworkPids.contains(albumPid) {
                     // entity_type=1 for album table reference
                     try executeSQL(db, """
-                        INSERT OR IGNORE INTO best_artwork_token (
+                        INSERT OR REPLACE INTO best_artwork_token (
                             entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
                             fetchable_artwork_source_type, artwork_variant_type
                         ) VALUES (
@@ -615,7 +777,7 @@ class MediaLibraryBuilder {
                     """)
                     // entity_type=4 for album artwork in library view
                     try executeSQL(db, """
-                        INSERT OR IGNORE INTO best_artwork_token (
+                        INSERT OR REPLACE INTO best_artwork_token (
                             entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
                             fetchable_artwork_source_type, artwork_variant_type
                         ) VALUES (
@@ -625,7 +787,7 @@ class MediaLibraryBuilder {
                     processedAlbumArtworkPids.insert(albumPid)
                 }
                 try executeSQL(db, """
-                    INSERT OR IGNORE INTO best_artwork_token (
+                    INSERT OR REPLACE INTO best_artwork_token (
                         entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
                         fetchable_artwork_source_type, artwork_variant_type
                     ) VALUES (
@@ -821,8 +983,8 @@ class MediaLibraryBuilder {
             if sqlite3_exec(db, statement + ";", nil, nil, &errMsg) != SQLITE_OK {
                 let error = errMsg.map { String(cString: $0) } ?? "Unknown error"
                 sqlite3_free(errMsg)
-                print("[MediaLibraryBuilder] Schema error: \(error)")
-                print("[MediaLibraryBuilder] Statement: \(statement)")
+                Logger.shared.log("[MediaLibraryBuilder] Schema error: \(error)")
+                Logger.shared.log("[MediaLibraryBuilder] Statement: \(statement)")
                 throw MediaLibraryError.schemaCreationFailed(error)
             }
         }
@@ -900,12 +1062,12 @@ class MediaLibraryBuilder {
             if sqlite3_exec(db, statement + ";", nil, nil, &errMsg) != SQLITE_OK {
                 let error = errMsg.map { String(cString: $0) } ?? "Unknown error"
                 sqlite3_free(errMsg)
-                print("[MediaLibraryBuilder] Index warning: \(error)")
+                Logger.shared.log("[MediaLibraryBuilder] Index warning: \(error)")
                 // Don't throw - indexes are optional, continue
             }
         }
         
-        print("[MediaLibraryBuilder] Indexes created")
+        Logger.shared.log("[MediaLibraryBuilder] Indexes created")
         
         // Create critical trigger
         try createTriggers(db: db)
@@ -935,10 +1097,10 @@ class MediaLibraryBuilder {
         if sqlite3_exec(db, triggerSQL, nil, nil, &errMsg) != SQLITE_OK {
             let error = errMsg.map { String(cString: $0) } ?? "Unknown error"
             sqlite3_free(errMsg)
-            print("[MediaLibraryBuilder] Trigger warning: \(error)")
+            Logger.shared.log("[MediaLibraryBuilder] Trigger warning: \(error)")
             // Don't throw - triggers are optional, continue
         } else {
-            print("[MediaLibraryBuilder] Triggers created")
+            Logger.shared.log("[MediaLibraryBuilder] Triggers created")
         }
     }
     
@@ -963,7 +1125,7 @@ class MediaLibraryBuilder {
             throw MediaLibraryError.insertFailed(error)
         }
         
-        print("[MediaLibraryBuilder] Base data inserted")
+        Logger.shared.log("[MediaLibraryBuilder] Base data inserted")
     }
     
     // MARK: - Song Insertion
@@ -1031,7 +1193,11 @@ class MediaLibraryBuilder {
             let albumOrder = insertSortMap(db: db, name: song.album)
             let genreOrder = insertSortMap(db: db, name: song.genre)
             
-            print("[MediaLibraryBuilder] Adding: \(song.title) -> \(song.remoteFilename)")
+            // Resolve metadata with fallbacks
+            let dbTrackNum = song.trackNumber ?? trackNum
+            let dbTrackCount = song.trackCount ?? 1
+            let dbDiscNum = song.discNumber ?? 1
+            let dbDiscCount = song.discCount ?? 1
             
             // INSERT into item table
             try executeSQL(db, """
@@ -1055,7 +1221,7 @@ class MediaLibraryBuilder {
                     \(albumArtistPid), \(artistOrder), 1,
                     0, 0, 27,
                     \(genreId), \(genreOrder), 1,
-                    1, \(trackNum), 1,
+                    \(dbDiscNum), \(dbTrackNum), 1,
                     3840, 0,
                     0, 1, 2, 0, 0,
                     1, 0, \(now), 0, 0, \(now), 0
@@ -1072,7 +1238,7 @@ class MediaLibraryBuilder {
                     media_kind, content_rating, content_rating_level, is_user_disabled, bpm, genius_id,
                     location_kind_id
                 ) VALUES (
-                    \(itemPid), '\(escapedTitle)', '\(escapedTitle)', 1, 1, \(song.durationMs), \(song.year),
+                    \(itemPid), '\(escapedTitle)', '\(escapedTitle)', \(dbDiscCount), \(dbTrackCount), \(song.durationMs), \(song.year),
                     '\(escapedFilename)', \(song.fileSize), \(MediaLibraryBuilder.generateIntegrityHex(filename: song.remoteFilename)), 0, \(now),
                     1, 0, 0, 0, 0, 0,
                     42
@@ -1116,7 +1282,8 @@ class MediaLibraryBuilder {
             // ARTWORK DATABASE with CORRECT HASH ALGORITHM
             // iOS computes artwork path as SHA1(artwork_token), NOT SHA1(image_data)!
             if song.artworkData != nil {
-                let artToken = "100\(trackNum)"
+                // Use ItemPID for token to guarantee uniqueness and alignment
+                let artToken = "100\(itemPid)"
                 
                 // CORRECT ALGORITHM: Hash the TOKEN, not the image data
                 var sha1Hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
@@ -1129,10 +1296,10 @@ class MediaLibraryBuilder {
                 let fileName = String(hashString.dropFirst(2))
                 let relativePath = "\(folderName)/\(fileName)"
                 
-                print("[MediaLibraryBuilder] ARTWORK (correct algorithm):")
-                print("  -> Token: \(artToken)")
-                print("  -> SHA1(token): \(hashString)")
-                print("  -> relativePath: \(relativePath)")
+                Logger.shared.log("[MediaLibraryBuilder] ARTWORK (correct algorithm):")
+                Logger.shared.log("  -> Token: \(artToken)")
+                Logger.shared.log("  -> SHA1(token): \(hashString)")
+                Logger.shared.log("  -> relativePath: \(relativePath)")
                 
                 collectedArtworkInfo.append(ArtworkInfo(
                     itemPid: itemPid, 
@@ -1150,31 +1317,32 @@ class MediaLibraryBuilder {
                         artwork_token, artwork_source_type, relative_path, artwork_type, 
                         interest_data, artwork_variant_type
                     ) VALUES (
-                        '\(artToken)', 300, '\(relativePath)', 1, '\(colorAnalysis)', 0
+                        '\(artToken)', 1, '\(relativePath)', 1, '\(colorAnalysis)', 0
                     )
                 """)
                 
                 try executeSQL(db, """
                     INSERT INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
-                    ) VALUES ('\(artToken)', 300, 1, \(itemPid), 0, 0)
+                    ) VALUES ('\(artToken)', 1, 1, \(itemPid), 0, 0)
                 """)
                 // entity_type=1 for album table reference
                 try executeSQL(db, """
                     INSERT OR IGNORE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
-                    ) VALUES ('\(artToken)', 300, 1, \(albumPid), 1, 0)
+                    ) VALUES ('\(artToken)', 1, 1, \(albumPid), 1, 0)
                 """)
+
                 // entity_type=4 for album artwork in library view
                 try executeSQL(db, """
                     INSERT OR IGNORE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
-                    ) VALUES ('\(artToken)', 300, 1, \(albumPid), 4, 0)
+                    ) VALUES ('\(artToken)', 1, 1, \(albumPid), 4, 0)
                 """)
                 try executeSQL(db, """
                     INSERT OR IGNORE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
-                    ) VALUES ('\(artToken)', 300, 1, \(artistPid), 2, 0)
+                    ) VALUES ('\(artToken)', 1, 1, \(artistPid), 2, 0)
                 """)
                 
                 try executeSQL(db, """
@@ -1207,6 +1375,8 @@ class MediaLibraryBuilder {
                     ) VALUES (\(artistPid), 2, 1, '\(artToken)', '', 0, 0)
                 """)
             }
+            
+
             
             trackNum += 1
         }
@@ -1295,8 +1465,8 @@ class MediaLibraryBuilder {
         if sqlite3_exec(db, sql, nil, nil, &errMsg) != SQLITE_OK {
             let error = errMsg.map { String(cString: $0) } ?? "Unknown error"
             sqlite3_free(errMsg)
-            print("[MediaLibraryBuilder] SQL Error: \(error)")
-            print("[MediaLibraryBuilder] SQL: \(sql)")
+            Logger.shared.log("[MediaLibraryBuilder] SQL Error: \(error)")
+            Logger.shared.log("[MediaLibraryBuilder] SQL: \(sql)")
             throw MediaLibraryError.insertFailed(error)
         }
     }
@@ -1347,7 +1517,7 @@ class MediaLibraryBuilder {
         if sqlite3_exec(db, sql, nil, nil, &errMsg) != SQLITE_OK {
             let error = errMsg.map { String(cString: $0) } ?? "Unknown error"
             sqlite3_free(errMsg)
-            print("[MediaLibraryBuilder] sort_map insert error: \(error)")
+            Logger.shared.log("[MediaLibraryBuilder] sort_map insert error: \(error)")
         }
         
         return nameOrder
@@ -1391,7 +1561,7 @@ class MediaLibraryBuilder {
         }
         sqlite3_finalize(stmt)
         
-        print("[MediaLibraryBuilder] Created playlist '\(playlistName)' with pid: \(containerPid)")
+        Logger.shared.log("[MediaLibraryBuilder] Created playlist '\(playlistName)' with pid: \(containerPid)")
         
         // Insert container_item entries for each song
         let itemSQL = """
@@ -1413,13 +1583,13 @@ class MediaLibraryBuilder {
                 
                 if sqlite3_step(stmt) != SQLITE_DONE {
                     let error = String(cString: sqlite3_errmsg(db))
-                    print("[MediaLibraryBuilder] container_item insert warning: \(error)")
+                    Logger.shared.log("[MediaLibraryBuilder] container_item insert warning: \(error)")
                 }
             }
             sqlite3_finalize(stmt)
         }
         
-        print("[MediaLibraryBuilder] Added \(songPids.count) songs to playlist")
+        Logger.shared.log("[MediaLibraryBuilder] Added \(songPids.count) songs to playlist")
     }
     
     /// Convenience to open database and extract playlists
@@ -1470,7 +1640,7 @@ class MediaLibraryBuilder {
         sqlite3_finalize(stmt)
         
         let startPos = maxPos + 1
-        print("[MediaLibraryBuilder] Appending \(songPids.count) songs to playlist \(containerPid) starting at pos \(startPos)")
+        Logger.shared.log("[MediaLibraryBuilder] Appending \(songPids.count) songs to playlist \(containerPid) starting at pos \(startPos)")
         
         // Insert container_item entries for each song
         let itemSQL = """
@@ -1493,7 +1663,7 @@ class MediaLibraryBuilder {
                 
                 if sqlite3_step(stmt) != SQLITE_DONE {
                     let error = String(cString: sqlite3_errmsg(db))
-                    print("[MediaLibraryBuilder] container_item insert warning: \(error)")
+                    Logger.shared.log("[MediaLibraryBuilder] container_item insert warning: \(error)")
                 }
             }
             sqlite3_finalize(stmt)
@@ -1514,7 +1684,7 @@ class MediaLibraryBuilder {
         if sqlite3_exec(db, baseLocSQL, nil, nil, &baseErrMsg) != SQLITE_OK {
             let error = baseErrMsg.map { String(cString: $0) } ?? "Unknown error"
             sqlite3_free(baseErrMsg)
-            print("[MediaLibraryBuilder] Warning: Failed to insert ringtone base location: \(error)")
+            Logger.shared.log("[MediaLibraryBuilder] Warning: Failed to insert ringtone base location: \(error)")
         }
         
         for ringtone in ringtones {
@@ -1524,7 +1694,7 @@ class MediaLibraryBuilder {
             // Generate sort orders
             let titleOrder = insertSortMap(db: db, name: ringtone.title)
             
-            print("[MediaLibraryBuilder] Adding Ringtone: \(ringtone.title) -> \(ringtone.remoteFilename)")
+            Logger.shared.log("[MediaLibraryBuilder] Adding Ringtone: \(ringtone.title) -> \(ringtone.remoteFilename)")
             
             // INSERT into item table (media_type 16384 for Ringtone, base_location 3900)
             try executeSQL(db, """

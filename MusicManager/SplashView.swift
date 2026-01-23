@@ -11,24 +11,15 @@ struct SplashView: View {
             
             VStack(spacing: 20) {
                 ZStack {
-                    Circle()
-                        .fill(Color.accentColor.opacity(0.1))
+                    Image("AppIconImage")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
                         .frame(width: 120, height: 120)
-                        .scaleEffect(isAnimating ? 1.1 : 1.0)
-                    
-                    Image(systemName: "music.note.list")
-                        .font(.system(size: 60))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [.primary, .blue],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 28))
                         .scaleEffect(isAnimating ? 1.0 : 0.8)
                 }
                 
-                Text("MusicManager")
+                Text("ByeTunes")
                     .font(.system(size: 40, weight: .bold, design: .rounded))
                     .tracking(1)
                     .opacity(opacity)
