@@ -8,7 +8,7 @@ struct SongRowView: View {
     
     var body: some View {
         HStack(spacing: 14) {
-            // Artwork
+            
             if let artworkData = song.artworkData, let uiImage = UIImage(data: artworkData) {
                 Image(uiImage: uiImage)
                     .resizable()
@@ -26,7 +26,7 @@ struct SongRowView: View {
                     )
             }
             
-            // Title and Artist
+            
             VStack(alignment: .leading, spacing: 3) {
                 Text(song.title)
                     .font(.body)
@@ -40,7 +40,7 @@ struct SongRowView: View {
             
             Spacer()
             
-            // Edit button (Manual Match)
+            
             if showEditButton {
                 Button {
                     onEdit()
@@ -54,7 +54,7 @@ struct SongRowView: View {
                 }
             }
             
-            // Delete button
+            
             Button {
                 onDelete()
             } label: {

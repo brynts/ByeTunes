@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 import CommonCrypto
 
-/// Compute SHA1 hash of data and return as lowercase hex string
+
 private func computeSHA1(data: Data) -> String {
     var hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
     data.withUnsafeBytes { bytes in
@@ -11,10 +11,10 @@ private func computeSHA1(data: Data) -> String {
     return hash.map { String(format: "%02x", $0) }.joined()
 }
 
-/// Search iTunes API for artwork URL (synchronous for use in DB building)
-/// Returns a high-resolution (1200x1200) artwork URL if found, nil otherwise
+
+
 private func fetchArtworkURLFromiTunes(title: String, artist: String) -> String? {
-    // Build search query
+    
     let searchQuery = "\(artist) \(title)"
         .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
     
@@ -22,7 +22,7 @@ private func fetchArtworkURLFromiTunes(title: String, artist: String) -> String?
         return nil
     }
     
-    // Synchronous request (running in background thread anyway)
+    
     let semaphore = DispatchSemaphore(value: 0)
     var artworkURL: String?
     
@@ -37,46 +37,41 @@ private func fetchArtworkURLFromiTunes(title: String, artist: String) -> String?
             return
         }
         
-        // Convert 100x100 URL to 1200x1200 for high resolution
+        
         artworkURL = artworkUrl100.replacingOccurrences(of: "100x100bb", with: "1200x1200bb")
     }.resume()
     
-    _ = semaphore.wait(timeout: .now() + 5)  // 5 second timeout
+    _ = semaphore.wait(timeout: .now() + 5)  
     return artworkURL
 }
 
 
 class MediaLibraryBuilder {
     
-    // MARK: - Artwork Info for ArtworkDB
     
-    /// Holds info needed to generate ArtworkDB entries
+    
+    
     struct ArtworkInfo {
-        let itemPid: Int64        // item_pid from MediaLibrary
-        let artworkHash: String   // SHA1 hash path like "ab/cdef1234..."
-        let artworkToken: String  // The token used in MediaLibrary (e.g. "1001")
-        let fileSize: UInt32      // Size of the artwork file in bytes
+        let itemPid: Int64        
+        let artworkHash: String   
+        let artworkToken: String  
+        let fileSize: UInt32      
     }
     
-    // MARK: - Integrity Helper
     
-    /// Generates the SQL Hex Literal for the integrity blob.
+    
+    
     private static func generateIntegrityHex(filename: String) -> String {
         
         return "X''"
-        /*
-        let pathKey = "iTunes_Control/Music/F00/\(filename)"
-        guard let data = pathKey.data(using: .utf8) else { return "X''" }
-        let hex = data.map { String(format: "%02X", $0) }.joined()
-        return "X'\(hex)'"
-        */
+        
     }
     
-    // MARK: - Audio Format Helpers
     
-    /// Convert a four-character code string (e.g. "flac") into an integer
+    
+    
     private static func fourCC(_ str: String) -> Int {
-        // Convert up to 4 ASCII bytes into a 32-bit integer, big-endian packing.
+        
         let padded = Array(str.utf8) + Array(repeating: 0x20, count: max(0, 4 - str.utf8.count))
         var val = 0
         for i in 0..<4 {
@@ -85,33 +80,33 @@ class MediaLibraryBuilder {
         return val
     }
 
-    /// Map file extension to item_playback.audio_format
-    /// Supports: MP3, FLAC, M4A, AAC, ALAC, WAV
+    
+    
     private static func audioFormatForExtension(_ ext: String) -> Int {
         switch ext.lowercased() {
         case "mp3":
             return 301
         case "flac":
-            return fourCC("fLaC")  // FLAC FourCC
+            return fourCC("fLaC")  
         case "m4a", "aac", "m4r":
-            return fourCC("aac ")  // AAC container
+            return fourCC("aac ")  
         case "alac":
-            return fourCC("alac") // Apple Lossless
+            return fourCC("alac") 
         case "wav", "wave":
-            return fourCC("WAVE") // WAV format
+            return fourCC("WAVE") 
         default:
-            return 0  // Unknown format
+            return 0  
         }
     }
     
-    /// Create a new database with the songs - RENAMED TO v104 TO FORCE REBUILD
+    
     static func createDatabase_v104(songs: [SongMetadata], playlistName: String? = nil) throws -> (dbURL: URL, artworkInfo: [ArtworkInfo], pids: [Int64]) {
         Logger.shared.log("[MediaLibraryBuilder] ====== createDatabase_v104 CALLED ======")
         let fileManager = FileManager.default
         let tempDir = fileManager.temporaryDirectory
         let dbPath = tempDir.appendingPathComponent("MediaLibrary.sqlitedb")
         
-        // Remover el archivo si ya existe
+        
         try? FileManager.default.removeItem(at: dbPath)
         
         var db: OpaquePointer?
@@ -126,13 +121,13 @@ class MediaLibraryBuilder {
         sqlite3_exec(db, "PRAGMA encoding='UTF-8';", nil, nil, &errMsg)
         sqlite3_exec(db, "PRAGMA user_version = 2320030;", nil, nil, &errMsg)
         
-        // Crear todas las tablas con el schema completo
+        
         try createSchema(db: db)
         
-        // Insertar data basica
+        
         try insertBaseData(db: db)
         
-        // Meter las canciones y sus entities usando la logica unificada (que tiene los fixes de Album Artist)
+        
         let insertResult = try insertSongsWithExisting(
             db: db,
             songs: songs,
@@ -144,13 +139,13 @@ class MediaLibraryBuilder {
         let songPids = insertResult.pids
         let artworkInfo = insertResult.artworkInfo
         
-        // Create playlist if name provided
+        
         if let playlistName = playlistName, !playlistName.isEmpty {
             try createPlaylist(db: db, playlistName: playlistName, songPids: songPids)
         }
         
         Logger.shared.log("[MediaLibraryBuilder] Database creada: \(dbPath.path)")
-        // Logger.shared.log("[MediaLibraryBuilder] Size: \((try? FileManager.default.attributesOfItem(atPath: dbPath.path)[.size]) ?? 0) bytes")
+        
         
         return (dbPath, artworkInfo, songPids)
     }
@@ -168,15 +163,15 @@ class MediaLibraryBuilder {
         let tempDir = FileManager.default.temporaryDirectory
         let dbPath = tempDir.appendingPathComponent("MediaLibrary.sqlitedb")
         
-        // Remove old files
+        
         try? FileManager.default.removeItem(at: dbPath)
         try? FileManager.default.removeItem(at: tempDir.appendingPathComponent("MediaLibrary.sqlitedb-wal"))
         try? FileManager.default.removeItem(at: tempDir.appendingPathComponent("MediaLibrary.sqlitedb-shm"))
         
-        // Write main DB
+        
         try existingDbData.write(to: dbPath)
         
-        // Write WAL/SHM if present
+        
         if let wal = walData {
             try wal.write(to: tempDir.appendingPathComponent("MediaLibrary.sqlitedb-wal"))
         }
@@ -190,8 +185,8 @@ class MediaLibraryBuilder {
         }
         defer { sqlite3_close(db) }
         
-        // CRITICAL: Checkpoint WAL FIRST to merge any pending iOS changes (like song deletions)
-        // This ensures we're working with a fully consistent database state
+        
+        
         if walData != nil {
             Logger.shared.log("[MediaLibraryBuilder] Checkpointing WAL to apply iOS changes...")
             var errorMsg: UnsafeMutablePointer<CChar>?
@@ -206,7 +201,7 @@ class MediaLibraryBuilder {
             }
         }
         
-        // Run integrity check to verify database is usable
+        
         var integrityStmt: OpaquePointer?
         var integrityOK = false
         if sqlite3_prepare_v2(db, "PRAGMA quick_check", -1, &integrityStmt, nil) == SQLITE_OK {
@@ -223,23 +218,23 @@ class MediaLibraryBuilder {
             Logger.shared.log("[MediaLibraryBuilder] WARNING: Database integrity check failed, but continuing...")
         }
         
-        // CLEANUP GHOST RECORDS
-        // If we know what files are actually on the device, we can delete DB records that point to nothing.
+        
+        
         if let onDeviceFiles = existingOnDeviceFiles {
             cleanupGhostRecords(db: db, existingOnDeviceFiles: onDeviceFiles)
         }
         
-        // Checar filenames existentes pa no re-uploadear
+        
         let existingFiles = getExistingFilenames(db: db)
         Logger.shared.log("[MediaLibraryBuilder] Found \(existingFiles.count) existing songs in database")
         
-        // Get existing entities to avoid duplicates
+        
         let existingArtists = getExistingArtists(db: db)
         let existingAlbums = getExistingAlbums(db: db)
         let existingGenres = getExistingGenres(db: db)
         let existingAlbumArtists = getExistingAlbumArtists(db: db)
         
-        // Insert new songs with entity reuse and collect pids
+        
         let insertResult = try insertSongsWithExisting(
             db: db, 
             songs: newSongs,
@@ -251,15 +246,15 @@ class MediaLibraryBuilder {
         let songPids = insertResult.pids
         let artworkInfo = insertResult.artworkInfo
         
-        // Handle playlist assignment
+        
         if let targetPid = targetPlaylistPid {
             try addToPlaylist(db: db, containerPid: targetPid, songPids: songPids)
         } else if let playlistName = playlistName, !playlistName.isEmpty {
             try createPlaylist(db: db, playlistName: playlistName, songPids: songPids)
         }
         
-        // Final checkpoint to ensure all changes are written to the main DB file
-        // We use DELETE mode to remove WAL/SHM files for cleaner upload
+        
+        
         var errorMsg: UnsafeMutablePointer<CChar>?
         sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, &errorMsg)
         if let msg = errorMsg {
@@ -267,14 +262,14 @@ class MediaLibraryBuilder {
             sqlite3_free(errorMsg)
         }
         
-        // Switch to DELETE journal mode for the final file (cleaner for upload)
+        
         sqlite3_exec(db, "PRAGMA journal_mode=DELETE", nil, nil, nil)
         
         Logger.shared.log("[MediaLibraryBuilder] Merged database saved: \(dbPath.path)")
         return (dbPath, existingFiles, artworkInfo, songPids)
     }
     
-    /// Agarrar los filenames que ya existen en la base
+    
     static func getExistingFilenames(db: OpaquePointer?) -> Set<String> {
         var filenames = Set<String>()
         var stmt: OpaquePointer?
@@ -291,14 +286,14 @@ class MediaLibraryBuilder {
         return filenames
     }
     
-    /// Remove database records that point to files that do not exist on the device
+    
     private static func cleanupGhostRecords(db: OpaquePointer?, existingOnDeviceFiles: Set<String>) {
         Logger.shared.log("[MediaLibraryBuilder] Starting Ghost Record Cleanup...")
         var pidsToDelete: [Int64] = []
         var stmt: OpaquePointer?
         
-        // Only check items with base_location_id = 3840 (Synched media) to avoid touching Cloud/System items
-        // Join with item_extra to get the filename (location)
+        
+        
         let query = """
             SELECT item.item_pid, item_extra.location 
             FROM item 
@@ -313,7 +308,7 @@ class MediaLibraryBuilder {
                     let location = String(cString: locPtr)
                     let filename = (location as NSString).lastPathComponent
                     
-                    // If the file mentioned in DB is NOT in the list of actual files -> DELETE IT
+                    
                     if !location.isEmpty && !existingOnDeviceFiles.contains(filename) {
                         Logger.shared.log("[MediaLibraryBuilder] Found GHOST record: PID \(pid), file '\(filename)' missing from device")
                         pidsToDelete.append(pid)
@@ -331,7 +326,7 @@ class MediaLibraryBuilder {
         Logger.shared.log("[MediaLibraryBuilder] Deleting \(pidsToDelete.count) ghost records...")
         
         for pid in pidsToDelete {
-            // Delete from all relevant tables
+            
             try? executeSQL(db, "DELETE FROM item WHERE item_pid=\(pid)")
             try? executeSQL(db, "DELETE FROM item_extra WHERE item_pid=\(pid)")
             try? executeSQL(db, "DELETE FROM item_playback WHERE item_pid=\(pid)")
@@ -346,7 +341,7 @@ class MediaLibraryBuilder {
         }
     }
     
-    /// Get existing artists from database
+    
     private static func getExistingArtists(db: OpaquePointer?) -> [String: Int64] {
         var artists: [String: Int64] = [:]
         var stmt: OpaquePointer?
@@ -365,7 +360,7 @@ class MediaLibraryBuilder {
         return artists
     }
     
-    /// Get existing albums from database
+    
     private static func getExistingAlbums(db: OpaquePointer?) -> [String: Int64] {
         var albums: [String: Int64] = [:]
         var stmt: OpaquePointer?
@@ -384,7 +379,7 @@ class MediaLibraryBuilder {
         return albums
     }
     
-    /// Get existing genres from database
+    
     private static func getExistingGenres(db: OpaquePointer?) -> [String: Int64] {
         var genres: [String: Int64] = [:]
         var stmt: OpaquePointer?
@@ -403,7 +398,7 @@ class MediaLibraryBuilder {
         return genres
     }
     
-    /// Get existing album artists from database
+    
     private static func getExistingAlbumArtists(db: OpaquePointer?) -> [String: Int64] {
         var albumArtists: [String: Int64] = [:]
         var stmt: OpaquePointer?
@@ -422,12 +417,12 @@ class MediaLibraryBuilder {
         return albumArtists
     }
     
-    /// Get existing song signatures for duplicate detection
+    
     private static func getExistingSongSignatures(db: OpaquePointer?) -> [String: Int64] {
         var signatures: [String: Int64] = [:]
         var stmt: OpaquePointer?
         
-        // Join tables to get Title, Artist, Album for each song
+        
         let query = """
             SELECT item.item_pid, item_extra.title, item_artist.item_artist, album.album 
             FROM item 
@@ -461,7 +456,7 @@ class MediaLibraryBuilder {
 
     
 
-    /// Insert songs while reusing existing entities
+    
     @discardableResult
     private static func insertSongsWithExisting(
         db: OpaquePointer?,
@@ -473,7 +468,7 @@ class MediaLibraryBuilder {
     ) throws -> (pids: [Int64], artworkInfo: [ArtworkInfo]) {
         let now = Int(Date().timeIntervalSince1970)
         
-        // Get max track count (for sequential artwork tokens)
+        
         var maxTrackNum = 0
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM item", -1, &stmt, nil) == SQLITE_OK {
@@ -485,37 +480,37 @@ class MediaLibraryBuilder {
         
         var trackNum = maxTrackNum + 1
         
-        // Mutable copies for tracking new entities
+        
         var artists = existingArtists
         var albums = existingAlbums
         var genres = existingGenres
         var albumArtists = existingAlbumArtists
         
-        // Track new entities to insert
+        
         var newArtists: [String: Int64] = [:]
         var newAlbums: [String: Int64] = [:]
         var newGenres: [String: Int64] = [:]
         var newAlbumArtists: [String: Int64] = [:]
         
-        // Track representative_item_pid for NEW entities only
+        
         var artistRepItem: [String: Int64] = [:]
         var albumRepItem: [String: Int64] = [:]
         var genreRepItem: [String: Int64] = [:]
         var albumArtistRepItem: [String: Int64] = [:]
         
-        // Track processed albums for artwork optimization
+        
         var processedAlbumArtworkPids = Set<Int64>()
         
         var insertedPids: [Int64] = []
         var collectedArtworkInfo: [ArtworkInfo] = []
         
-        // Detect existing songs to reuse PIDs (Ghost Song Fix)
-        // Map "Title|Artist|Album" -> PID
+        
+        
         let existingSignatures = getExistingSongSignatures(db: db)
         Logger.shared.log("[MediaLibraryBuilder] Found \(existingSignatures.count) existing song signatures for duplicate checking")
         
         for song in songs {
-            // Check if song already exists
+            
             let signature = "\(song.title)|\(song.artist)|\(song.album)"
             
             let itemPid: Int64
@@ -528,7 +523,7 @@ class MediaLibraryBuilder {
             
             insertedPids.append(itemPid)
             
-            // Get or create artist - track first item as representative for NEW entities
+            
             let artistPid: Int64
             if let existing = artists[song.artist] {
                 artistPid = existing
@@ -536,7 +531,7 @@ class MediaLibraryBuilder {
                 let newPid = SongMetadata.generatePersistentId()
                 artists[song.artist] = newPid
                 newArtists[song.artist] = newPid
-                artistRepItem[song.artist] = itemPid  // First song for this NEW artist
+                artistRepItem[song.artist] = itemPid  
                 artistPid = newPid
             }
             
@@ -549,11 +544,11 @@ class MediaLibraryBuilder {
                 let newPid = SongMetadata.generatePersistentId()
                 albumArtists[effectiveAlbumArtistName] = newPid
                 newAlbumArtists[effectiveAlbumArtistName] = newPid
-                albumArtistRepItem[effectiveAlbumArtistName] = itemPid  // First song for this NEW album artist
+                albumArtistRepItem[effectiveAlbumArtistName] = itemPid  
                 albumArtistPid = newPid
             }
             
-            // Get or create album - track first item as representative for NEW entities
+            
             let albumPid: Int64
             if let existing = albums[song.album] {
                 albumPid = existing
@@ -561,11 +556,11 @@ class MediaLibraryBuilder {
                 let newPid = SongMetadata.generatePersistentId()
                 albums[song.album] = newPid
                 newAlbums[song.album] = newPid
-                albumRepItem[song.album] = itemPid  // First song for this NEW album
+                albumRepItem[song.album] = itemPid  
                 albumPid = newPid
             }
             
-            // Get or create genre - track first item as representative for NEW entities
+            
             let genreId: Int64
             if let existing = genres[song.genre] {
                 genreId = existing
@@ -573,28 +568,28 @@ class MediaLibraryBuilder {
                 let newPid = SongMetadata.generatePersistentId()
                 genres[song.genre] = newPid
                 newGenres[song.genre] = newPid
-                genreRepItem[song.genre] = itemPid  // First song for this NEW genre
+                genreRepItem[song.genre] = itemPid  
                 genreId = newPid
             }
             
-            // Generate sort orders by inserting into sort_map - CRITICAL for Albums/Artists to appear in lists
+            
             let titleOrder = insertSortMap(db: db, name: song.title)
             let artistOrder = insertSortMap(db: db, name: song.artist)
             let albumOrder = insertSortMap(db: db, name: song.album)
             let genreOrder = insertSortMap(db: db, name: song.genre)
-            // Ensure Album Artist is also in sort map
+            
              _ = insertSortMap(db: db, name: effectiveAlbumArtistName)
             
             Logger.shared.log("[MediaLibraryBuilder] Merging: \(song.title) -> \(song.remoteFilename)")
             
-            // Resolve metadata with fallbacks
+            
             let dbTrackNum = song.trackNumber ?? trackNum
             let dbTrackCount = song.trackCount ?? 1
             let dbDiscNum = song.discNumber ?? 1
             let dbDiscCount = song.discCount ?? 1
             
-            // Explicitly DELETE to ensure stale data (like bad years) is removed
-            // INSERT OR REPLACE *should* work, but let's be nuclear to fix the persistence issue.
+            
+            
             try? executeSQL(db, "DELETE FROM item WHERE item_pid = \(itemPid)")
             try? executeSQL(db, "DELETE FROM item_extra WHERE item_pid = \(itemPid)")
             try? executeSQL(db, "DELETE FROM item_playback WHERE item_pid = \(itemPid)")
@@ -602,7 +597,7 @@ class MediaLibraryBuilder {
             try? executeSQL(db, "DELETE FROM item_store WHERE item_pid = \(itemPid)")
             try? executeSQL(db, "DELETE FROM item_search WHERE item_pid = \(itemPid)")
             
-            // INSERT into item table
+            
             try executeSQL(db, """
                 INSERT INTO item (
                     item_pid, media_type, title_order, title_order_section,
@@ -631,7 +626,7 @@ class MediaLibraryBuilder {
                 )
             """)
             
-            // INSERT into item_extra
+            
             let escapedTitle = song.title.replacingOccurrences(of: "'", with: "''")
             let escapedFilename = song.remoteFilename.replacingOccurrences(of: "'", with: "''")
             try executeSQL(db, """
@@ -648,7 +643,7 @@ class MediaLibraryBuilder {
                 )
             """)
             
-            // INSERT into item_playback
+            
             let audioFmt = audioFormatForExtension(URL(fileURLWithPath: song.remoteFilename).pathExtension)
             try executeSQL(db, """
                 INSERT INTO item_playback (
@@ -660,38 +655,38 @@ class MediaLibraryBuilder {
                 )
             """)
             
-            // INSERT into item_stats
+            
             try executeSQL(db, "INSERT OR REPLACE INTO item_stats (item_pid, date_accessed) VALUES (\(itemPid), \(now))")
             
-            // INSERT into item_store
-            // Re-enabling as disabling it caused 'Ghost Albums' (Songs hidden)
+            
+            
             let syncId = SongMetadata.generatePersistentId()
             try executeSQL(db, "INSERT OR REPLACE INTO item_store (item_pid, sync_id, sync_in_my_library) VALUES (\(itemPid), \(syncId), 1)")
             
-            // INSERT into item_video
+            
             try executeSQL(db, "INSERT OR REPLACE INTO item_video (item_pid) VALUES (\(itemPid))")
             
-            // INSERT into item_search
+            
             try executeSQL(db, """
                 INSERT OR REPLACE INTO item_search (item_pid, search_title, search_album, search_artist, search_composer, search_album_artist)
                 VALUES (\(itemPid), \(titleOrder), \(albumOrder), \(artistOrder), 0, \(artistOrder))
             """)
             
-            // INSERT into lyrics
+            
             try executeSQL(db, "INSERT OR REPLACE INTO lyrics (item_pid) VALUES (\(itemPid))")
             
-            // INSERT into chapter
+            
             try executeSQL(db, "INSERT OR REPLACE INTO chapter (item_pid) VALUES (\(itemPid))")
             
-            // ARTWORK DATABASE with CORRECT HASH ALGORITHM
-            // iOS computes artwork path as SHA1(artwork_token), NOT SHA1(image_data)!
-            // The artwork_token can be any unique string - we use a numeric token.
-            // relative_path = SHA1(artwork_token) split as "XX/rest_of_hash"
+            
+            
+            
+            
             if song.artworkData != nil {
-                // Use a simple numeric token based on the track number
+                
                 let artToken = "100\(trackNum)"
                 
-                // CORRECT ALGORITHM: Hash the TOKEN, not the image data
+                
                 var sha1Hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
                 let tokenData = artToken.data(using: .utf8)!
                 tokenData.withUnsafeBytes { bytes in
@@ -707,7 +702,7 @@ class MediaLibraryBuilder {
                 print("  -> SHA1(token): \(hashString)")
                 print("  -> relativePath: \(relativePath)")
                 
-                // Collect for artwork file upload (using image data, but stored at token-based path)
+                
                 collectedArtworkInfo.append(ArtworkInfo(
                     itemPid: itemPid, 
                     artworkHash: relativePath, 
@@ -715,8 +710,8 @@ class MediaLibraryBuilder {
                     fileSize: UInt32(song.artworkData!.count)
                 ))
                 
-                // 1. Insert into artwork table with ColorAnalysis (required for album artwork display)
-                // ColorAnalysis provides background/text colors for album view - stored in interest_data column
+                
+                
                 let colorAnalysis = """
                 {"ColorAnalysis":{"1":{"primaryTextColorLight":"NO","secondaryTextColorLight":"NO","secondaryTextColor":"#FFFFFF","tertiaryTextColorLight":"NO","primaryTextColor":"#FFFFFF","tertiaryTextColor":"#CCCCCC","backgroundColorLight":"NO","backgroundColor":"#333333"}}}
                 """
@@ -730,7 +725,7 @@ class MediaLibraryBuilder {
                     )
                 """)
                 
-                // 2. Insert into artwork_token table (link to item, album, artist)
+                
                 try executeSQL(db, """
                     INSERT OR REPLACE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
@@ -738,7 +733,7 @@ class MediaLibraryBuilder {
                         '\(artToken)', 1, 1, \(itemPid), 0, 0
                     )
                 """)
-                // entity_type=1 for album table reference
+                
                 try executeSQL(db, """
                     INSERT OR REPLACE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
@@ -746,7 +741,7 @@ class MediaLibraryBuilder {
                         '\(artToken)', 1, 1, \(albumPid), 1, 0
                     )
                 """)
-                // entity_type=4 for album artwork in library view (iOS uses this!)
+                
                 try executeSQL(db, """
                     INSERT OR REPLACE INTO artwork_token (
                         artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
@@ -762,8 +757,8 @@ class MediaLibraryBuilder {
                     )
                 """)
                 
-                // 3. Insert into best_artwork_token table
-                // fetchable_artwork_token should be EMPTY for local artwork (not fetched remotely)
+                
+                
                 try executeSQL(db, """
                     INSERT OR REPLACE INTO best_artwork_token (
                         entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
@@ -773,7 +768,7 @@ class MediaLibraryBuilder {
                     )
                 """)
                 if !processedAlbumArtworkPids.contains(albumPid) {
-                    // entity_type=1 for album table reference
+                    
                     try executeSQL(db, """
                         INSERT OR REPLACE INTO best_artwork_token (
                             entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
@@ -782,7 +777,7 @@ class MediaLibraryBuilder {
                             \(albumPid), 1, 1, '\(artToken)', '', 0, 0
                         )
                     """)
-                    // entity_type=4 for album artwork in library view
+                    
                     try executeSQL(db, """
                         INSERT OR REPLACE INTO best_artwork_token (
                             entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token, 
@@ -806,7 +801,7 @@ class MediaLibraryBuilder {
             trackNum += 1
         }
         
-        // Insertar artistas nuevos
+        
         for (artistName, artistPid) in newArtists {
             let escapedName = artistName.replacingOccurrences(of: "'", with: "''")
             let groupingKey = SongMetadata.generateGroupingKey(artistName)
@@ -819,21 +814,21 @@ class MediaLibraryBuilder {
             """)
         }
         
-        // Insertar album artistas nuevos - incluye el sort/name order pal Artists view
+        
         for (artistName, aaPid) in newAlbumArtists {
             let escapedName = artistName.replacingOccurrences(of: "'", with: "''")
             let groupingKey = SongMetadata.generateGroupingKey(artistName)
             let groupingHex = groupingKey.map { String(format: "%02x", $0) }.joined()
             let syncId = SongMetadata.generatePersistentId()
             let repItem = albumArtistRepItem[artistName] ?? 0
-            // Get/create sort_map entry for this artist - needed for Artists list view
+            
             let nameOrder = insertSortMap(db: db, name: artistName)
-            // Calculate section (first letter: A=1, B=2, etc., non-alpha=27)
+            
             var sortOrderSection = 27
             if let firstChar = artistName.uppercased().first {
                 let charValue = Int(firstChar.asciiValue ?? 0)
-                if charValue >= 65 && charValue <= 90 { // A-Z
-                    sortOrderSection = charValue - 64 // A=1, B=2, etc.
+                if charValue >= 65 && charValue <= 90 { 
+                    sortOrderSection = charValue - 64 
                 }
             }
             try executeSQL(db, """
@@ -842,7 +837,7 @@ class MediaLibraryBuilder {
             """)
         }
         
-        // INSERT new albums only
+        
         for (albumName, albumPid) in newAlbums {
             let escapedName = albumName.replacingOccurrences(of: "'", with: "''")
             let groupingKey = SongMetadata.generateGroupingKey(albumName)
@@ -861,7 +856,7 @@ class MediaLibraryBuilder {
             }
         }
         
-        // INSERT new genres only
+        
         for (genreName, genreId) in newGenres {
             let escapedName = genreName.replacingOccurrences(of: "'", with: "''")
             let groupingKey = SongMetadata.generateGroupingKey(genreName)
@@ -873,20 +868,20 @@ class MediaLibraryBuilder {
             """)
         }
         
-        // FIX EXISTING RECORDS - Update sync_id and keep_local for all albums/artists that don't have it
+        
         print("[MediaLibraryBuilder] Fixing existing records without sync_id...")
         
-        // Update all albums that have sync_id = 0
+        
         try executeSQL(db, """
             UPDATE album SET sync_id = abs(random()), keep_local = 1 WHERE sync_id = 0
         """)
         
-        // Update all album_artists that have sync_id = 0
+        
         try executeSQL(db, """
             UPDATE album_artist SET sync_id = abs(random()), keep_local = 1 WHERE sync_id = 0
         """)
         
-        // Update all item_artists that have sync_id = 0
+        
         try executeSQL(db, """
             UPDATE item_artist SET sync_id = abs(random()), keep_local = 1 WHERE sync_id = 0
         """)
@@ -895,7 +890,7 @@ class MediaLibraryBuilder {
         return (insertedPids, collectedArtworkInfo)
     }
     
-    // MARK: - Schema Creation
+    
     
     private static func createSchema(db: OpaquePointer?) throws {
         let schema = """
@@ -1001,12 +996,12 @@ class MediaLibraryBuilder {
         
 
         
-        // Create indexes - CRITICAL for MPMediaLibrary to function
+        
         
         try createIndexes(db: db)
     }
     
-    // MARK: - Index Creation
+    
     
     private static func createIndexes(db: OpaquePointer?) throws {
         let indexes = """
@@ -1073,20 +1068,20 @@ class MediaLibraryBuilder {
                 let error = errMsg.map { String(cString: $0) } ?? "Unknown error"
                 sqlite3_free(errMsg)
                 Logger.shared.log("[MediaLibraryBuilder] Index warning: \(error)")
-                // Don't throw - indexes are optional, continue
+                
             }
         }
         
         Logger.shared.log("[MediaLibraryBuilder] Indexes created")
         
-        // Create critical trigger
+        
         try createTriggers(db: db)
     }
     
-    // MARK: - Trigger Creation
+    
     
     private static func createTriggers(db: OpaquePointer?) throws {
-        // This trigger is CRITICAL - it sets in_my_library when item_store is inserted
+        
         let triggerSQL = """
         CREATE TRIGGER IF NOT EXISTS on_insert_item_setInMyLibraryColumn 
         AFTER INSERT ON item_store 
@@ -1108,16 +1103,16 @@ class MediaLibraryBuilder {
             let error = errMsg.map { String(cString: $0) } ?? "Unknown error"
             sqlite3_free(errMsg)
             Logger.shared.log("[MediaLibraryBuilder] Trigger warning: \(error)")
-            // Don't throw - triggers are optional, continue
+            
         } else {
             Logger.shared.log("[MediaLibraryBuilder] Triggers created")
         }
     }
     
-    // MARK: - Base Data
+    
     
     private static func insertBaseData(db: OpaquePointer?) throws {
-        // Base location - use relative path
+        
         let baseDataSQL = """
         INSERT INTO base_location (base_location_id, path) VALUES (0, '');
         INSERT INTO base_location (base_location_id, path) VALUES (3840, 'iTunes_Control/Music/F00');
@@ -1138,10 +1133,10 @@ class MediaLibraryBuilder {
         Logger.shared.log("[MediaLibraryBuilder] Base data inserted")
     }
     
-        /// Format: Hex(filename + "iTunes_Control/Music/F00")
+        
     static func generateRingtoneIntegrity(filename: String) -> String {
-        // Ringtones usually reside in iTunes_Control/Ringtones
-        // Match the same logic as songs for consistency
+        
+        
         let rawString = "iTunes_Control/Ringtones/\(filename)"
         guard let data = rawString.data(using: .utf8) else { return "" }
         return data.map { String(format: "%02X", $0) }.joined()
@@ -1158,12 +1153,12 @@ class MediaLibraryBuilder {
         }
     }
     
-    /// Insert a string into sort_map and return its name_order
-    /// This is CRITICAL for Albums/Artists to appear in list views
+    
+    
     private static func insertSortMap(db: OpaquePointer?, name: String) -> Int64 {
         let escapedName = name.replacingOccurrences(of: "'", with: "''")
         
-        // Check if already exists
+        
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, "SELECT name_order FROM sort_map WHERE name = '\(escapedName)'", -1, &stmt, nil) == SQLITE_OK {
             if sqlite3_step(stmt) == SQLITE_ROW {
@@ -1174,7 +1169,7 @@ class MediaLibraryBuilder {
         }
         sqlite3_finalize(stmt)
         
-        // Get max name_order
+        
         var maxOrder: Int64 = 0
         if sqlite3_prepare_v2(db, "SELECT MAX(name_order) FROM sort_map", -1, &stmt, nil) == SQLITE_OK {
             if sqlite3_step(stmt) == SQLITE_ROW {
@@ -1185,20 +1180,20 @@ class MediaLibraryBuilder {
         
         let nameOrder = maxOrder + 1
         
-        // Calculate section (first letter: A=1, B=2, etc., non-alpha=27)
+        
         var nameSection = 27
         if let firstChar = name.uppercased().first {
             let charValue = Int(firstChar.asciiValue ?? 0)
-            if charValue >= 65 && charValue <= 90 { // A-Z
-                nameSection = charValue - 64 // A=1, B=2, etc.
+            if charValue >= 65 && charValue <= 90 { 
+                nameSection = charValue - 64 
             }
         }
         
-        // Generate sort key (grouping key for sorting)
+        
         let sortKey = SongMetadata.generateGroupingKey(name)
         let sortKeyHex = sortKey.map { String(format: "%02x", $0) }.joined()
         
-        // Insert into sort_map
+        
         var errMsg: UnsafeMutablePointer<CChar>?
         let sql = "INSERT OR IGNORE INTO sort_map (name, name_order, name_section, sort_key) VALUES ('\(escapedName)', \(nameOrder), \(nameSection), X'\(sortKeyHex)')"
         if sqlite3_exec(db, sql, nil, nil, &errMsg) != SQLITE_OK {
@@ -1210,21 +1205,21 @@ class MediaLibraryBuilder {
         return nameOrder
     }
     
-    // MARK: - Playlist Creation
     
-    /// Creates a playlist and adds songs to it
-    /// - Parameters:
-    ///   - db: Database handle
-    ///   - playlistName: Name of the playlist
-    ///   - songPids: Array of item_pid values for songs to add
+    
+    
+    
+    
+    
+    
     static func createPlaylist(db: OpaquePointer?, playlistName: String, songPids: [Int64]) throws {
         let containerPid = Int64.random(in: 1_000_000_000...9_999_999_999_999)
         let now = Int64(Date().timeIntervalSince1970)
         
-        // Insert playlist name into sort_map
+        
         let nameOrder = insertSortMap(db: db, name: playlistName)
         
-        // Insert into container table
+        
         let containerSQL = """
         INSERT INTO container (
             container_pid, name, name_order, date_created, date_modified,
@@ -1250,7 +1245,7 @@ class MediaLibraryBuilder {
         
         Logger.shared.log("[MediaLibraryBuilder] Created playlist '\(playlistName)' with pid: \(containerPid)")
         
-        // Insert container_item entries for each song
+        
         let itemSQL = """
         INSERT INTO container_item (
             container_item_pid, container_pid, item_pid, position, uuid
@@ -1279,7 +1274,7 @@ class MediaLibraryBuilder {
         Logger.shared.log("[MediaLibraryBuilder] Added \(songPids.count) songs to playlist")
     }
     
-    /// Convenience to open database and extract playlists
+    
     static func extractPlaylists(fromDbPath path: String) -> [(name: String, pid: Int64)] {
         var db: OpaquePointer?
         guard sqlite3_open(path, &db) == SQLITE_OK else {
@@ -1289,7 +1284,7 @@ class MediaLibraryBuilder {
         return getPlaylists(db: db)
     }
     
-    /// Get existing user playlists
+    
     static func getPlaylists(db: OpaquePointer?) -> [(name: String, pid: Int64)] {
         var playlists: [(String, Int64)] = []
         let query = "SELECT name, container_pid FROM container WHERE contained_media_type = 8 AND distinguished_kind = 0 ORDER BY name"
@@ -1308,9 +1303,9 @@ class MediaLibraryBuilder {
         return playlists
     }
     
-    /// Add songs to an existing playlist
+    
     static func addToPlaylist(db: OpaquePointer?, containerPid: Int64, songPids: [Int64]) throws {
-        // Get current max position
+        
         var maxPos: Int64 = -1
         let maxQuery = "SELECT MAX(position) FROM container_item WHERE container_pid = ?"
         var stmt: OpaquePointer?
@@ -1318,7 +1313,7 @@ class MediaLibraryBuilder {
         if sqlite3_prepare_v2(db, maxQuery, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_int64(stmt, 1, containerPid)
             if sqlite3_step(stmt) == SQLITE_ROW {
-                // Check for NULL (empty playlist returns NULL for MAX)
+                
                 if sqlite3_column_type(stmt, 0) != SQLITE_NULL {
                     maxPos = sqlite3_column_int64(stmt, 0)
                 }
@@ -1329,7 +1324,7 @@ class MediaLibraryBuilder {
         let startPos = maxPos + 1
         Logger.shared.log("[MediaLibraryBuilder] Appending \(songPids.count) songs to playlist \(containerPid) starting at pos \(startPos)")
         
-        // Insert container_item entries for each song
+        
         let itemSQL = """
         INSERT INTO container_item (
             container_item_pid, container_pid, item_pid, position, uuid
@@ -1357,15 +1352,15 @@ class MediaLibraryBuilder {
         }
     }
     
-    // MARK: - Ringtone Insertion
     
-    /// Insert ringtones into the database
+    
+    
     @discardableResult
     static func insertRingtones(db: OpaquePointer?, ringtones: [SongMetadata]) throws -> [Int64] {
         let now = Int(Date().timeIntervalSince1970)
         var insertedPids: [Int64] = []
         
-        // Ensure base_location 3900 exists
+        
         let baseLocSQL = "INSERT OR IGNORE INTO base_location (base_location_id, path) VALUES (3900, 'iTunes_Control/Ringtones')"
         var baseErrMsg: UnsafeMutablePointer<CChar>?
         if sqlite3_exec(db, baseLocSQL, nil, nil, &baseErrMsg) != SQLITE_OK {
@@ -1378,12 +1373,12 @@ class MediaLibraryBuilder {
             let itemPid = SongMetadata.generatePersistentId()
             insertedPids.append(itemPid)
             
-            // Generate sort orders
+            
             let titleOrder = insertSortMap(db: db, name: ringtone.title)
             
             Logger.shared.log("[MediaLibraryBuilder] Adding Ringtone: \(ringtone.title) -> \(ringtone.remoteFilename)")
             
-            // INSERT into item table (media_type 16384 for Ringtone, base_location 3900)
+            
             try executeSQL(db, """
                 INSERT INTO item (
                     item_pid, media_type, title_order, title_order_section,
@@ -1412,11 +1407,11 @@ class MediaLibraryBuilder {
                 )
             """)
             
-            // INSERT into item_extra
-            // Note: Ringtones typically don't track duration in item_extra same way, but let's put it.
-            // location_kind_id? check. 42 is file.
-            // media_kind? usually 1 for music? maybe 16384 for ringtone? or just 1.
-            // Testing showed that media_type in item table is the KEY.
+            
+            
+            
+            
+            
             let escapedTitle = ringtone.title.replacingOccurrences(of: "'", with: "''")
             let escapedFilename = ringtone.remoteFilename.replacingOccurrences(of: "'", with: "''")
             try executeSQL(db, """
@@ -1433,8 +1428,8 @@ class MediaLibraryBuilder {
                 )
             """)
             
-            // INSERT into item_playback
-            let audioFmt = audioFormatForExtension("m4r") // Always M4R
+            
+            let audioFmt = audioFormatForExtension("m4r") 
             try executeSQL(db, """
                 INSERT INTO item_playback (
                     item_pid, audio_format, bit_rate, codec_type, codec_subtype, data_kind,
@@ -1445,10 +1440,10 @@ class MediaLibraryBuilder {
                 )
             """)
             
-            // INSERT into item_stats
+            
             try executeSQL(db, "INSERT INTO item_stats (item_pid, date_accessed) VALUES (\(itemPid), \(now))")
             
-            // INSERT into item_store
+            
             let syncId = SongMetadata.generatePersistentId()
             try executeSQL(db, "INSERT INTO item_store (item_pid, sync_id, sync_in_my_library) VALUES (\(itemPid), \(syncId), 1)")
         }
@@ -1457,7 +1452,7 @@ class MediaLibraryBuilder {
     }
 }
 
-// MARK: - Errors
+
 
 enum MediaLibraryError: Error, LocalizedError {
     case databaseOpenFailed

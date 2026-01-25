@@ -20,16 +20,16 @@ struct MusicView: View {
     @State private var existingPlaylists: [PlaylistModel] = []
     @State private var isFetchingPlaylists = false
     
-    // Toast State
+    
     @State private var showToast = false
     @State private var toastTitle = ""
     @State private var toastIcon = ""
     
-    // Injection count state
+    
     @State private var currentInjectIndex = 0
     @State private var totalInjectCount = 0
     
-    // Manual Match State
+    
     @State private var selectedSongForMatch: SongMetadata?
 
     
@@ -45,15 +45,15 @@ struct MusicView: View {
             Color(.systemGroupedBackground)
                 .ignoresSafeArea()
             
-            // ScrollView removed to disable page scrolling
+            
             VStack(alignment: .leading, spacing: 10) {
-                // Header
+                
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 10) {
                         Text("Music")
                             .font(.system(size: 34, weight: .bold))
                         
-                        // Connection indicator
+                        
                         HStack(spacing: 6) {
                             Circle()
                                 .fill(manager.heartbeatReady ? Color.green : Color.red)
@@ -70,9 +70,9 @@ struct MusicView: View {
                 }
                 .padding(.top, 0)
                 
-                // Quick Actions
+                
                 VStack(spacing: 12) {
-                    // Add songs button - primary action
+                    
                     Button {
                         showingMusicPicker = true
                     } label: {
@@ -89,17 +89,17 @@ struct MusicView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     
-                    // Inject button with progress fill
+                    
                     Button {
                         injectSongs()
                     } label: {
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
-                                // Background
+                                
                                 RoundedRectangle(cornerRadius: 24)
                                     .fill(Color(.systemGray6))
                                 
-                                // Fill progress
+                                
                                 if isInjecting {
                                     RoundedRectangle(cornerRadius: 24)
                                         .fill(Color.black.opacity(0.15))
@@ -107,7 +107,7 @@ struct MusicView: View {
                                         .animation(.easeInOut(duration: 0.3), value: injectProgress)
                                 }
                                 
-                                // Content
+                                
                                 HStack {
                                     Spacer()
                                     if isInjecting {
@@ -130,16 +130,16 @@ struct MusicView: View {
                     .disabled(!manager.heartbeatReady || songs.isEmpty || isInjecting)
                     .opacity(songs.isEmpty ? 0.5 : 1)
                     
-                    // Inject as Playlist
+                    
                     
                     Button {
                         isFetchingPlaylists = true
-                        // status = "Fetching playlists..."
+                        
                         manager.fetchPlaylists { playlists in
                             self.existingPlaylists = playlists.map { PlaylistModel(name: $0.name, pid: $0.pid) }
                             self.isFetchingPlaylists = false
                             self.showingPlaylistSheet = true
-                            // self.status = "Select a playlist"
+                            
                         }
                     } label: {
                         HStack {
@@ -163,7 +163,7 @@ struct MusicView: View {
                     .opacity(songs.isEmpty ? 0.5 : 1)
                 }
                 
-                // Persistent Warning when queue is not empty - Placed here to be always visible
+                
                 if !songs.isEmpty && !isInjecting {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -185,7 +185,7 @@ struct MusicView: View {
                     )
                 }
 
-                // Songs List
+                
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
                         Text("Queue")
@@ -201,7 +201,7 @@ struct MusicView: View {
                     }
                     
                     if songs.isEmpty {
-                        // Empty state
+                        
                         VStack(spacing: 16) {
                             Image(systemName: "music.note")
                                 .font(.system(size: 48, weight: .light))
@@ -219,12 +219,12 @@ struct MusicView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 60)
                     } else {
-                        // Song list
+                        
                         ScrollView {
                             VStack(spacing: 0) {
                                 ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
                                     VStack(spacing: 0) {
-                                        // Calculate edit state
+                                        
                                         let source = UserDefaults.standard.string(forKey: "metadataSource")
                                         let isAPISource = source == "itunes" || source == "deezer"
                                          
@@ -256,7 +256,7 @@ struct MusicView: View {
                                 }
                             }
                         }
-                        .frame(maxHeight: .infinity) // Fill remaining space compacted layout provides
+                        .frame(maxHeight: .infinity) 
                         .background(Color(.systemBackground))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .overlay(
@@ -266,14 +266,14 @@ struct MusicView: View {
                     }
                 }
                 
-                Spacer() // Push content to top
+                Spacer() 
             }
-            .padding(.bottom, 40) // Padding inside content, not frame
+            .padding(.bottom, 40) 
             .padding(.horizontal, 20)
-            // Removed frame-constraining padding from here
+            
 
         
-        // Toast Overlay
+        
         if showToast {
             HStack(spacing: 12) {
                 Image(systemName: toastIcon)
@@ -292,11 +292,11 @@ struct MusicView: View {
             .clipShape(RoundedRectangle(cornerRadius: 16))
             .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
             .padding(.horizontal, 24)
-            .padding(.bottom, 100) // Position above nav bar
+            .padding(.bottom, 100) 
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(100)
         }
-    } // Close ZStack here
+    } 
     
 
         .sheet(isPresented: $showingMusicPicker) {
@@ -337,7 +337,7 @@ struct MusicView: View {
     
     private var playlistSelectionSheet: some View {
         VStack(spacing: 0) {
-            // Custom Header
+            
             HStack {
                 Text("Select Playlist")
                     .font(.system(size: 24, weight: .bold))
@@ -356,10 +356,10 @@ struct MusicView: View {
             
             ScrollView {
                 VStack(spacing: 20) {
-                    // Create New Button
+                    
                     Button {
                         showingPlaylistSheet = false
-                        // Small delay to allow sheet to dismiss before alert shows
+                        
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                             showPlaylistAlert = true
                         }
@@ -386,7 +386,7 @@ struct MusicView: View {
                         .shadow(color: Color.black.opacity(0.05), radius: 2, x: 0, y: 1)
                     }
                     
-                    // Existing List
+                    
                     VStack(alignment: .leading, spacing: 10) {
                         Text("EXISTING PLAYLISTS")
                             .font(.caption)
@@ -466,7 +466,7 @@ struct MusicView: View {
                 try? FileManager.default.copyItem(at: url, to: destURL)
                 
                 if var song = try? await SongMetadata.fromURL(destURL) {
-                    // Enrich if option is enabled AND autofetch is ON
+                    
                     if useiTunes && autofetch {
                         song = await SongMetadata.enrichWithiTunesMetadata(song)
                     }
@@ -490,7 +490,7 @@ struct MusicView: View {
         totalInjectCount = songs.count
         currentInjectIndex = 0
         
-        // Refresh connection first
+        
         manager.startHeartbeat { success in
             guard success else {
                 DispatchQueue.main.async {
@@ -500,7 +500,7 @@ struct MusicView: View {
                 return
             }
             
-            // Proceed with injection after connection is fresh
+            
             DispatchQueue.main.async {
                 self.startInjectionProcess()
             }
@@ -508,7 +508,7 @@ struct MusicView: View {
     }
     
     private func startInjectionProcess() {
-        // Progress animation
+        
         let progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             if self.injectProgress < 0.9 {
                 self.injectProgress += 0.02
@@ -517,11 +517,11 @@ struct MusicView: View {
         
         manager.injectSongs(songs: songs, progress: { progressText in
             DispatchQueue.main.async {
-                // Parse progress text like "Injecting song 3/10" to extract current index
+                
                 if let range = progressText.range(of: #"(\d+)/\d+"#, options: .regularExpression),
                    let index = Int(progressText[range].split(separator: "/").first ?? "") {
                     self.currentInjectIndex = index
-                    // Update progress bar based on actual count
+                    
                     self.injectProgress = CGFloat(index) / CGFloat(self.totalInjectCount) * 0.9
                 }
             }
@@ -538,7 +538,12 @@ struct MusicView: View {
                     self.injectProgress = 0
                     
                     if success {
-                        // success
+                        
+                        // Cleanup files after successful injection
+                        for song in self.songs {
+                            try? FileManager.default.removeItem(at: song.localURL)
+                        }
+                        
                         self.showToast(title: "Injection Complete", icon: "checkmark.circle.fill")
                         withAnimation {
                             self.songs.removeAll()
@@ -560,11 +565,11 @@ struct MusicView: View {
             self.showToast = true
         }
         
-        // Haptic feedback
+        
         let generator = UINotificationFeedbackGenerator()
         generator.notificationOccurred(.success)
         
-        // Auto hide
+        
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
             withAnimation(.easeOut(duration: 0.5)) {
                 self.showToast = false
@@ -581,7 +586,7 @@ struct MusicView: View {
         injectProgress = 0
 
         
-        // Refresh connection first
+        
         manager.startHeartbeat { success in
             guard success else {
                 DispatchQueue.main.async {
@@ -606,7 +611,7 @@ struct MusicView: View {
         
         manager.injectSongsAsPlaylist(songs: songs, playlistName: name, targetPlaylistPid: pid, progress: { progressText in
             DispatchQueue.main.async {
-                // self.status = progressText
+                
             }
         }) { success in
             DispatchQueue.main.async {
@@ -621,6 +626,11 @@ struct MusicView: View {
                     self.injectProgress = 0
                     
                     if success {
+                        
+                        // Cleanup files after successful playlist injection
+                        for song in self.songs {
+                            try? FileManager.default.removeItem(at: song.localURL)
+                        }
 
                         self.showToast(title: "Playlist Updated", icon: "checkmark.circle.fill")
                         withAnimation {

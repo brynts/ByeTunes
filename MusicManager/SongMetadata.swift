@@ -1,7 +1,7 @@
 import Foundation
 import AVFoundation
 
-/// Song metadata
+
 struct SongMetadata: Identifiable {
     let id = UUID()
     
@@ -22,12 +22,12 @@ struct SongMetadata: Identifiable {
     var discNumber: Int?
     var discCount: Int?
     
-    /// Artwork token 
+    
     var artworkToken: String {
         return "local://\(remoteFilename)"
     }
     
-    /// Generar un filename random de 4 chars tipo iTunes
+    
     static func generateRemoteFilename(withExtension ext: String? = nil) -> String {
         let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         let randomName = String((0..<4).map { _ in letters.randomElement()! })
@@ -35,12 +35,12 @@ struct SongMetadata: Identifiable {
         return "\(randomName).\(e)"
     }
     
-    /// Generar un persistent ID random de 64-bit
+    
     static func generatePersistentId() -> Int64 {
         return Int64.random(in: 1_000_000_000_000_000_000...Int64.max)
     }
     
-    /// Generar bytes de grouping key sorting
+    
     static func generateGroupingKey(_ text: String) -> Data {
         guard !text.isEmpty else { return Data() }
         
@@ -57,18 +57,18 @@ struct SongMetadata: Identifiable {
         return Data(result)
     }
 
-    /// Extract metadata from an MP3 file using AVFoundation
+    
     static func fromURL(_ url: URL) async throws -> SongMetadata {
         let asset = AVURLAsset(url: url)
         
-        // Get duration
+        
         let duration = try await asset.load(.duration)
         let durationMs = Int(CMTimeGetSeconds(duration) * 1000)
         
-        // Get file size
+        
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
         
-        // Parse filename as fallback (e.g., "Artist - Title.flac" or "Title - Artist.flac")
+        
         let filenameWithoutExt = url.deletingPathExtension().lastPathComponent
         var title = filenameWithoutExt
         var artist = "Unknown Artist"
@@ -83,17 +83,17 @@ struct SongMetadata: Identifiable {
         var discNumber: Int?
         var discCount: Int?
         
-        // Try to parse "Title - Artist" or "Artist - Title" from filename
+        
         if filenameWithoutExt.contains(" - ") {
             let parts = filenameWithoutExt.components(separatedBy: " - ")
             if parts.count >= 2 {
-                // Assume format: "Title - Artist"
+                
                 title = parts[0].trimmingCharacters(in: .whitespaces)
                 artist = parts[1].trimmingCharacters(in: .whitespaces)
             }
         }
         
-        // Try common metadata first (works for MP3, M4A)
+        
         let commonMetadata = try await asset.load(.commonMetadata)
         
         for item in commonMetadata {
@@ -130,38 +130,38 @@ struct SongMetadata: Identifiable {
             }
         }
         
-        // DEEP SCAN: Load ALL metadata formats to find Track/Disc numbers (ID3 'TRCK', iTunes 'trkn', Vorbis 'TRACKNUMBER')
+        
         let allMetadata = try await asset.load(.metadata)
-        // print("[SongMetadata] Scanning \(allMetadata.count) items for Track/Disc info...")
+        
         
         for item in allMetadata {
-            // Get key as String (could be "TRCK", "trkn", "TRACKNUMBER", etc.)
+            
             var keyString = ""
             if let strKey = item.key as? String {
                 keyString = strKey
             } else if let intKey = item.key as? Int {
-                // ID3v2.3 tags sometimes come as Int codes? Rarely. Usually String identifiers.
-                // But AVMetadataItem.identifier is more reliable.
+                
+                
                 keyString = "\(intKey)"
             }
             
             let identifier = item.identifier?.rawValue ?? ""
             let combined = "\(identifier)|\(keyString)".uppercased()
             
-            // print("[SongMetadata] Key: \(combined)") 
             
-            // TRACK NUMBER
+            
+            
             if trackNumber == nil {
                 if combined.contains("TRCK") || combined.contains("TRACK") || combined.contains("TRKN") || keyString.lowercased() == "trkn" {
-                    // Try parsing as String "1/12"
+                    
                     if let stringVal = try? await item.load(.stringValue) {
                         let components = stringVal.components(separatedBy: "/")
                         if let t = Int(components[0]) { trackNumber = t }
                         if components.count > 1, let tc = Int(components[1]) { trackCount = tc }
                     }
-                    // Try parsing as binary data (iTunes 'trkn' atom: 8 bytes)
+                    
                     else if let dataVal = try? await item.load(.dataValue), dataVal.count >= 8 {
-                        // Bytes 2-3 = Track Num, 4-5 = Track Count (Big Endian)
+                        
                         let track = dataVal.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self).bigEndian }
                         let total = dataVal.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt16.self).bigEndian }
                         if track > 0 { trackNumber = Int(track) }
@@ -170,15 +170,15 @@ struct SongMetadata: Identifiable {
                 }
             }
             
-            // DISC NUMBER
+            
             if discNumber == nil {
                 if combined.contains("TPOS") || combined.contains("DISC") || combined.contains("DISK") || keyString.lowercased() == "disk" {
                      if let stringVal = try? await item.load(.stringValue) {
                         let components = stringVal.components(separatedBy: "/")
                         if let d = Int(components[0]) { discNumber = d }
                         if components.count > 1, let dc = Int(components[1]) { discCount = dc }
-                     } else if let dataVal = try? await item.load(.dataValue), dataVal.count >= 6 { // 'disk' usually 6 bytes? or 8?
-                         // Assuming similar structure to trkn
+                     } else if let dataVal = try? await item.load(.dataValue), dataVal.count >= 6 { 
+                         
                          let disc = dataVal.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self).bigEndian }
                          let total = dataVal.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt16.self).bigEndian }
                          if disc > 0 { discNumber = Int(disc) }
@@ -187,9 +187,9 @@ struct SongMetadata: Identifiable {
                 }
             }
 
-            // ARTWORK (Deep Scan / FLAC Fallback)
+            
             if artworkData == nil {
-                // Check keys that indicate artwork
+                
                 if combined.contains("ARTWORK") || combined.contains("PICTURE") || combined.contains("APIC") || combined.contains("COVR") {
                     if let data = try? await item.load(.dataValue), !data.isEmpty {
                         artworkData = data
@@ -205,7 +205,7 @@ struct SongMetadata: Identifiable {
                 if combined.contains("ALBUM") && !combined.contains("ALBUMARTIST") && album == "Unknown Album" { album = val }
                 if (combined.contains("GENRE") || combined.contains("GEN")) && genre == "Unknown Genre" { genre = val }
                 
-                // Album Artist
+                
                 if (combined.contains("ALBUMARTIST") || combined.contains("TPE2") || combined.contains("AART")) {
                    let trimmed = val.trimmingCharacters(in: .whitespacesAndNewlines)
                    if !trimmed.isEmpty && trimmed.lowercased() != "unknown artist" {
@@ -216,7 +216,7 @@ struct SongMetadata: Identifiable {
                    }
                 }
 
-                // Year extraction
+                
                 if year == Calendar.current.component(.year, from: Date()) {
                     if combined.contains("DATE") || combined.contains("YEAR") || combined.contains("TYER") || combined.contains("TDRC") || combined.contains("DAY") {
                         if let extracted = extractYear(from: val) {
@@ -228,7 +228,7 @@ struct SongMetadata: Identifiable {
             }
         }
         
-        // Final fallback sanitization
+        
         if let aa = albumArtist, (aa.isEmpty || aa.lowercased() == "unknown artist") {
             albumArtist = nil
         }
@@ -254,11 +254,11 @@ struct SongMetadata: Identifiable {
         )
     }
     
-    /// Helper to extract a valid 4-digit year (1900-2100) from a string
+    
     static private func extractYear(from string: String) -> Int? {
-        // Regex to look for 4 digits: \b(19|20)\d{2}\b
-        // Matches 19xx or 20xx
-        // Also allow 2100 just in case
+        
+        
+        
         
         do {
             let regex = try NSRegularExpression(pattern: "\\b(19|20)\\d{2}\\b")
@@ -275,7 +275,7 @@ struct SongMetadata: Identifiable {
             return nil
         }
         
-        // Fallback: simple 4 digit prefix if it looks sane (for "2023-05-21")
+        
         if let prefixInt = Int(string.prefix(4)), prefixInt >= 1900 && prefixInt <= 2100 {
             return prefixInt
         }
@@ -284,7 +284,7 @@ struct SongMetadata: Identifiable {
     }
 }
 
-// MARK: - iTunes Metadata Data Structures
+
 
 struct iTunesSearchResult: Codable {
     let results: [iTunesSong]
@@ -305,11 +305,11 @@ struct iTunesSong: Codable, Identifiable {
     let discCount: Int?
 }
 
-// MARK: - Enrichment Logic
+
 
 extension SongMetadata {
     
-    /// Perform a raw search on iTunes API
+    
     static func searchiTunes(query: String) async -> [iTunesSong] {
         let region = UserDefaults.standard.string(forKey: "storeRegion") ?? "US"
         let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
@@ -327,11 +327,11 @@ extension SongMetadata {
         }
     }
     
-    /// Apply an iTunes match to a song (including fetching artwork)
+    
     static func applyiTunesMatch(_ match: iTunesSong, to song: SongMetadata) async -> SongMetadata {
         var newSong = song
         
-        // Update metadata
+        
         if let t = match.trackName { newSong.title = t }
         if let a = match.artistName { newSong.artist = a }
         if let c = match.collectionName { newSong.album = c }
@@ -347,9 +347,9 @@ extension SongMetadata {
             newSong.year = yearInt
         }
         
-        // Fetch High-Res Artwork
+        
         if let artUrl = match.artworkUrl100 {
-            // Resize to 1200x1200bb for high quality
+            
             let highResUrlString = artUrl.replacingOccurrences(of: "100x100bb", with: "1200x1200bb")
             if let highResUrl = URL(string: highResUrlString),
                let (artData, _) = try? await URLSession.shared.data(from: highResUrl) {
@@ -361,35 +361,35 @@ extension SongMetadata {
         return newSong
     }
 
-    /// Enrich the existing metadata by searching on iTunes API (Auto Mode)
+    
     static func enrichWithiTunesMetadata(_ song: SongMetadata) async -> SongMetadata {
         print("[SongMetadata] Searching iTunes for: \(song.artist) - \(song.title)")
         
         let query = "\(song.artist) \(song.title)"
         let results = await searchiTunes(query: query)
         
-        // Find the best match
+        
         var bestMatch: iTunesSong?
         
         for match in results {
             guard let remoteArtist = match.artistName,
                   let remoteTitle = match.trackName else { continue }
             
-            // Artist Validation Strategy
+            
             if song.artist != "Unknown Artist" {
                 let localNorm = song.artist.lowercased().filter { !$0.isPunctuation }
                 let remoteNorm = remoteArtist.lowercased().filter { !$0.isPunctuation }
                 
-                // Check if one contains the other
+                
                 if localNorm.contains(remoteNorm) || remoteNorm.contains(localNorm) {
                     bestMatch = match
                     print("[SongMetadata] ✓ Validated match: \(remoteTitle) by \(remoteArtist)")
-                    break // Found a valid one!
+                    break 
                 } else {
                     print("[SongMetadata] x Rejected match: \(remoteTitle) by \(remoteArtist) (Artist mismatch)")
                 }
             } else {
-                // If local artist is unknown, take the first valid result
+                
                 bestMatch = match
                 break
             }
@@ -404,7 +404,7 @@ extension SongMetadata {
     }
 }
 
-// MARK: - Deezer Metadata Data Structures
+
 
 struct DeezerSearchResult: Codable {
     let data: [DeezerSong]
@@ -417,7 +417,7 @@ struct DeezerSong: Codable, Identifiable {
     let album: DeezerAlbumReference
     let duration: Int
     
-    // Helper to conform to similar interface if needed
+    
     var trackName: String { title }
     var artistName: String { artist.name }
     var albumName: String { album.title }
@@ -436,14 +436,14 @@ struct DeezerAlbumReference: Codable {
 struct DeezerTrackDetails: Codable {
     let track_position: Int?
     let disk_number: Int?
-    let release_date: String? // Format: YYYY-MM-DD
+    let release_date: String? 
 }
 
-// MARK: - Enrichment Logic Extension
+
 
 extension SongMetadata {
     
-    /// Perform a raw search on Deezer API
+    
     static func searchDeezer(query: String) async -> [DeezerSong] {
         let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         guard let url = URL(string: "https://api.deezer.com/search?q=\(encodedQuery)&limit=10") else {
@@ -472,7 +472,7 @@ extension SongMetadata {
         }
     }
     
-    /// Apply a Deezer match to a song
+    
     static func applyDeezerMatch(_ match: DeezerSong, to song: SongMetadata) async -> SongMetadata {
         var newSong = song
         
@@ -480,16 +480,16 @@ extension SongMetadata {
         newSong.artist = match.artist.name
         newSong.album = match.album.title
         
-        // Deezer duration is in seconds
+        
         newSong.durationMs = match.duration * 1000
         
-        // Fetch Detailed Info (Track, Disc, Year)
+        
         if let details = await fetchDeezerTrackDetails(id: match.id) {
             if let t = details.track_position { newSong.trackNumber = t }
             if let d = details.disk_number { newSong.discNumber = d }
             
             if let releaseDate = details.release_date {
-                // Parse YYYY-MM-DD
+                
                 let components = releaseDate.split(separator: "-")
                 if let yearStr = components.first, let yearInt = Int(yearStr) {
                     newSong.year = yearInt
@@ -498,7 +498,7 @@ extension SongMetadata {
             print("[SongMetadata] Enhanced with Deezer details: Trk \(details.track_position ?? 0), Disc \(details.disk_number ?? 0), Year \(newSong.year)")
         }
         
-        // Fetch High-Res Artwork (cover_xl is 1000x1000 usually)
+        
         if let artUrl = URL(string: match.album.cover_xl),
            let (artData, _) = try? await URLSession.shared.data(from: artUrl) {
             newSong.artworkData = artData

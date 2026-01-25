@@ -8,7 +8,7 @@ class Logger: ObservableObject {
     @Published var logs: String = ""
     private var dateFormatter: DateFormatter
     
-    // We use a serial queue to ensure thread safety when appending logs
+    
     private let logQueue = DispatchQueue(label: "com.edualexxis.MusicManager.logger")
     
     private init() {
@@ -23,10 +23,10 @@ class Logger: ObservableObject {
         let timestamp = dateFormatter.string(from: Date())
         let formattedMessage = "[\(timestamp)] \(message)"
         
-        // Print to Xcode console
+        
         print(formattedMessage)
         
-        // Append to in-app log buffer
+        
         logQueue.async {
             DispatchQueue.main.async {
                 self.logs.append(formattedMessage + "\n")

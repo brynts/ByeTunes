@@ -11,7 +11,7 @@ struct RingtoneMetadata: Identifiable {
     
     static func fromURL(_ url: URL) -> RingtoneMetadata {
         let name = url.deletingPathExtension().lastPathComponent
-        // Generate random 4-char name + .m4r
+        
         let randomName = String((0..<4).map { _ in "ABCDEFGHIJKLMNOPQRSTUVWXYZ".randomElement()! })
         let remoteName = "\(randomName).m4r"
         
@@ -29,16 +29,16 @@ struct RingtonesView: View {
     @State private var showingPicker = false
     @State private var injectProgress: CGFloat = 0
     
-    // Toast State
+    
     @State private var showToast = false
     @State private var toastTitle = ""
     @State private var toastIcon = ""
     
-    // Injection count state
+    
     @State private var currentInjectIndex = 0
     @State private var totalInjectCount = 0
     
-    // MP3 & M4R Types
+    
     static var supportedTypes: [UTType] {
         let m4r = UTType(filenameExtension: "m4r") ?? .audio
         return [m4r, .mp3]
@@ -50,13 +50,13 @@ struct RingtonesView: View {
                 .ignoresSafeArea()
             
             VStack(alignment: .leading, spacing: 10) {
-                // Header
+                
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 10) {
                         Text("Ringtones")
                             .font(.system(size: 34, weight: .bold))
                         
-                        // Connection indicator
+                        
                         HStack(spacing: 6) {
                             Circle()
                                 .fill(manager.heartbeatReady ? Color.green : Color.red)
@@ -73,7 +73,7 @@ struct RingtonesView: View {
                 }
                 .padding(.top, 0)
                 
-                // Action Buttons
+                
                 VStack(spacing: 12) {
                     Button {
                         showingPicker = true
@@ -91,17 +91,17 @@ struct RingtonesView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     
-                    // Inject button with progress fill
+                    
                     Button {
                         injectRingtones()
                     } label: {
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
-                                // Background
+                                
                                 RoundedRectangle(cornerRadius: 24)
                                     .fill(Color(.systemGray6))
                                 
-                                // Fill progress
+                                
                                 if isInjecting {
                                     RoundedRectangle(cornerRadius: 24)
                                         .fill(Color.black.opacity(0.15))
@@ -109,7 +109,7 @@ struct RingtonesView: View {
                                         .animation(.easeInOut(duration: 0.3), value: injectProgress)
                                 }
                                 
-                                // Content
+                                
                                 HStack {
                                     Spacer()
                                     if isInjecting {
@@ -133,7 +133,7 @@ struct RingtonesView: View {
                     .opacity(ringtones.isEmpty ? 0.6 : 1)
                 }
                 
-                // Persistent Warning when queue is not empty
+                
                 if !ringtones.isEmpty && !isInjecting {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -155,7 +155,7 @@ struct RingtonesView: View {
                     )
                 }
                 
-                // List
+                
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Text("Queue")
@@ -263,7 +263,7 @@ struct RingtonesView: View {
             }
             .padding(.horizontal, 20)
             
-            // Toast Overlay
+            
             if showToast {
                 HStack(spacing: 12) {
                     Image(systemName: toastIcon)
@@ -339,12 +339,12 @@ struct RingtonesView: View {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .m4a
         
-        // 'export()' is async but does NOT throw in current SDKs (it sets status).
-        // Deprecation warning for 'export()' usually refers to the completion handler version OR explicit 'export' usage if replaced.
-        // However, 'await exportSession.export()' is the standard modern Swift concurrency replacement.
-        // If compiler complains about 'export()' deprecated in iOS 18 without replacement in error message, it likely suggests 'export(to:completion:)' or similar?
-        // Actually, 'export()' was introduced in iOS 15.
-        // Let's assume the warning is about the *name collision* with old sync methods or similar, OR maybe we should check status manually without try/catch.
+        
+        
+        
+        
+        
+        
         
         await exportSession.export()
 
@@ -369,7 +369,7 @@ struct RingtonesView: View {
         totalInjectCount = ringtones.count
         currentInjectIndex = 0
         
-        // Refresh connection first
+        
         manager.startHeartbeat { success in
             guard success else {
                 DispatchQueue.main.async {
@@ -379,7 +379,7 @@ struct RingtonesView: View {
                 return
             }
             
-            // Proceed with injection after connection is fresh
+            
             DispatchQueue.main.async {
                 self.startRingtoneInjection()
             }
@@ -410,7 +410,7 @@ struct RingtonesView: View {
         
         manager.injectRingtones(ringtones: songs) { progressText in
             DispatchQueue.main.async {
-                // Parse progress text to extract current index
+                
                 if let range = progressText.range(of: #"(\d+)/\d+"#, options: .regularExpression),
                    let index = Int(progressText[range].split(separator: "/").first ?? "") {
                     self.currentInjectIndex = index

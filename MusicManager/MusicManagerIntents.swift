@@ -2,14 +2,14 @@ import AppIntents
 import Foundation
 import UniformTypeIdentifiers
 
-// MARK: - Inject Music
+
 
 @available(iOS 16.0, *)
 struct InjectMusicIntent: AppIntent {
     static var title: LocalizedStringResource = "Inject Music"
     static var description = IntentDescription("Injects audio files to your device's music library")
     
-    // Need to open app so we can talk to the device
+    
     static var openAppWhenRun: Bool = true
     
     @Parameter(title: "Audio Files", description: "Select audio files to inject", supportedContentTypes: [.audio, .mp3, .mpeg4Audio, .wav, UTType("com.apple.m4a-audio")!, UTType("org.xiph.flac")!])
@@ -19,7 +19,7 @@ struct InjectMusicIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let manager = DeviceManager.shared
         
-        // Try to connect if we're not already
+        
         if !manager.heartbeatReady {
             manager.startHeartbeat()
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -65,14 +65,14 @@ struct InjectMusicIntent: AppIntent {
     }
 }
 
-// MARK: - Inject Ringtone
+
 
 @available(iOS 16.0, *)
 struct InjectRingtoneIntent: AppIntent {
     static var title: LocalizedStringResource = "Inject Ringtone"
     static var description = IntentDescription("Injects an audio file as a ringtone to your device")
     
-    // Need to open app so we can talk to the device
+    
     static var openAppWhenRun: Bool = true
     
     @Parameter(title: "Ringtone File", description: "Select a ringtone file to inject", supportedContentTypes: [.audio, .mp3, UTType("com.apple.m4a-audio")!])
@@ -82,7 +82,7 @@ struct InjectRingtoneIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let manager = DeviceManager.shared
         
-        // Try to connect if we're not already
+        
         if !manager.heartbeatReady {
             manager.startHeartbeat()
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -103,7 +103,7 @@ struct InjectRingtoneIntent: AppIntent {
         
         let ringtone = RingtoneMetadata.fromURL(tempURL)
         
-        // Pack it as a SongMetadata since that's what the injector expects
+        
         let song = SongMetadata(
             localURL: ringtone.url,
             title: ringtone.name,
@@ -133,7 +133,7 @@ struct InjectRingtoneIntent: AppIntent {
     }
 }
 
-// MARK: - Shortcuts Provider
+
 
 @available(iOS 16.0, *)
 struct MusicManagerShortcuts: AppShortcutsProvider {

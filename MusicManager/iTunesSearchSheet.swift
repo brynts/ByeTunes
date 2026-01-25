@@ -18,7 +18,7 @@ struct iTunesSearchSheet: View {
                 .ignoresSafeArea()
             
             VStack(spacing: 0) {
-                // Header (Same as before)
+                
                 HStack {
                     Text("Select Match")
                         .font(.system(size: 24, weight: .bold))
@@ -34,7 +34,7 @@ struct iTunesSearchSheet: View {
                 .padding([.top, .horizontal], 20)
                 .padding(.bottom, 10)
                 
-                // Search Bar (Same as before)
+                
                 HStack {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
@@ -60,7 +60,7 @@ struct iTunesSearchSheet: View {
                 .padding(.bottom, 16)
                 .shadow(color: Color.black.opacity(0.05), radius: 2, x: 0, y: 1)
                 
-                // Content
+                
                 if isLoading {
                     Spacer()
                     VStack(spacing: 12) {
@@ -195,7 +195,7 @@ struct iTunesSearchSheet: View {
     }
 }
 
-// Subviews
+
 struct iTunesRow: View {
     let match: iTunesSong
     var body: some View {

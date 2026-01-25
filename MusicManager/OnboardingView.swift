@@ -14,7 +14,7 @@ struct OnboardingView: View {
     
     var body: some View {
         ZStack {
-            // Background Gradient
+            
             LinearGradient(
                 gradient: Gradient(colors: [Color(.systemBackground), Color(.secondarySystemBackground)]),
                 startPoint: .top,
@@ -25,7 +25,7 @@ struct OnboardingView: View {
             VStack(spacing: 0) {
                 Spacer()
                 
-                // Hero Section
+                
                 VStack(spacing: 16) {
                     ZStack {
                         Image("AppIconImage")
@@ -59,9 +59,9 @@ struct OnboardingView: View {
                 
                 Spacer()
                 
-                // Setup Card
+                
                 VStack(spacing: 24) {
-                    // Title
+                    
                     HStack {
                         Text("Setup Required")
                             .font(.headline)
@@ -69,7 +69,7 @@ struct OnboardingView: View {
                         Spacer()
                     }
                     
-                    // Steps Timeline
+                    
                     VStack(alignment: .leading, spacing: 0) {
                         StepRow(number: "1", text: "Export pairing file from computer", isLast: false)
                         StepRow(number: "2", text: "Transfer file to this iPhone", isLast: false)
@@ -78,7 +78,7 @@ struct OnboardingView: View {
                     
                     Divider()
                     
-                    // Status & Action
+                    
                     VStack(spacing: 16) {
                         if !statusMessage.isEmpty {
                             HStack(spacing: 8) {
@@ -176,6 +176,10 @@ struct OnboardingView: View {
         let destination = manager.pairingFile
         
         do {
+            let directory = destination.deletingLastPathComponent()
+            if !FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            }
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.removeItem(at: destination)
             }

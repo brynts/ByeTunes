@@ -8,7 +8,7 @@ struct SettingsView: View {
     @State private var showingPairingPicker = false
     @State private var showingDeleteAlert = false
     
-    // Toast State
+    
     @State private var showToast = false
     @State private var toastTitle = ""
     @State private var toastIcon = ""
@@ -24,12 +24,12 @@ struct SettingsView: View {
             
             ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                // Header
+                
                 Text("Settings")
                     .font(.system(size: 34, weight: .bold))
                     .padding(.top, 8)
                 
-                // Connection Section
+                
                 VStack(alignment: .leading, spacing: 12) {
                     Text("CONNECTION")
                         .font(.caption)
@@ -38,7 +38,7 @@ struct SettingsView: View {
                         .tracking(0.5)
                     
                     VStack(spacing: 0) {
-                        // Pairing file
+                        
                         Button {
                             showingPairingPicker = true
                         } label: {
@@ -69,7 +69,7 @@ struct SettingsView: View {
                         
                         Divider().padding(.leading, 56)
                         
-                        // Status
+                        
                         HStack {
                             Image(systemName: "antenna.radiowaves.left.and.right")
                                 .font(.body)
@@ -114,7 +114,7 @@ struct SettingsView: View {
                     )
                 }
                 
-                // About Section
+                
                 VStack(alignment: .leading, spacing: 12) {
                     Text("ABOUT")
                         .font(.caption)
@@ -191,7 +191,7 @@ struct SettingsView: View {
                 
                 
                 
-                // Metadata Section
+                
                 VStack(alignment: .leading, spacing: 12) {
                     Text("METADATA")
                         .font(.caption)
@@ -285,7 +285,7 @@ struct SettingsView: View {
                     )
                 }
                 
-                // Shortcuts
+                
                 VStack(alignment: .leading, spacing: 12) {
                     Text("SHORTCUTS")
                         .font(.caption)
@@ -323,7 +323,7 @@ struct SettingsView: View {
                     )
                 }
                 
-                // Help & Support
+                
                 VStack(alignment: .leading, spacing: 12) {
                     Text("HELP & SUPPORT")
                         .font(.caption)
@@ -432,7 +432,7 @@ struct SettingsView: View {
                     )
                 }
                 
-                // Credits
+                
                 VStack(alignment: .leading, spacing: 12) {
                     Text("CREDITS")
                         .font(.caption)
@@ -515,7 +515,7 @@ struct SettingsView: View {
                     )
                 }
                 
-                // Danger Zone
+                
                 VStack(alignment: .leading, spacing: 12) {
                     Text("DANGER ZONE")
                         .font(.caption)
@@ -562,10 +562,10 @@ struct SettingsView: View {
         .alert("Delete Library?", isPresented: $showingDeleteAlert) {
             Button("Cancel", role: .cancel) { }
             Button("Delete", role: .destructive) {
-                // status = "Deleting library..."
+                
                 manager.deleteMediaLibrary { success in
                     DispatchQueue.main.async {
-                        // status = "Ready"
+                        
                         
                         if success {
                            self.showToast(title: "Library Deleted", icon: "trash.circle.fill")
@@ -580,7 +580,7 @@ struct SettingsView: View {
         }
     }
     
-        // Toast Overlay
+        
         if showToast {
             HStack(spacing: 12) {
                 Image(systemName: toastIcon)
@@ -644,7 +644,7 @@ struct SettingsView: View {
             
             status = "Pairing file imported"
             
-            // Just start heartbeat - it handles retries
+            
             manager.startHeartbeat()
         } catch {
             status = "Import failed"

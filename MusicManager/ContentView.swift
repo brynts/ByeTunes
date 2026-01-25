@@ -23,9 +23,9 @@ struct ContentView: View {
             if !showSplash {
                 Group {
             if hasCompletedOnboarding {
-                // Main App
+                
                 ZStack(alignment: .bottom) {
-                    // Background that extends to edges
+                    
                     Color(.systemGroupedBackground)
                         .ignoresSafeArea()
                     
@@ -60,7 +60,7 @@ struct ContentView: View {
                     removal: .opacity.combined(with: .scale(scale: 1.2))
                 ))
             } else {
-                // Onboarding
+                
                 OnboardingView(
                     manager: manager,
                     isComplete: $hasCompletedOnboarding
@@ -73,33 +73,33 @@ struct ContentView: View {
             showingLogViewer = true
         }
         .onAppear {
-            // Splash Screen Timer
+            
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                 withAnimation(.easeOut(duration: 0.5)) {
                     showSplash = false
                 }
             }
             
-            // Check if pairing file already exists
+            
             if FileManager.default.fileExists(atPath: manager.pairingFile.path) {
                 hasCompletedOnboarding = true
                 manager.startHeartbeat()
             }
             
-            // Check for pending injections from Share Extension
+            
             checkPendingInjections()
         }
         .onOpenURL { url in
-            // File shared to our app
+            
             handleIncomingFile(url)
         }
     }
     
-    // MARK: - Shared Files
+    
     private func handleIncomingFile(_ url: URL) {
         print("[ContentView] Received file via Open With: \(url.lastPathComponent)")
         
-        // Need permission to read the file
+        
         guard url.startAccessingSecurityScopedResource() else {
             print("[ContentView] Failed to access security-scoped resource")
             return
@@ -108,7 +108,7 @@ struct ContentView: View {
         
         let ext = url.pathExtension.lowercased()
         
-        // Copy to our sandbox
+        
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let destURL = documentsURL.appendingPathComponent(url.lastPathComponent)
         
@@ -119,24 +119,24 @@ struct ContentView: View {
             try FileManager.default.copyItem(at: url, to: destURL)
             
             if ext == "m4r" {
-                // It's a ringtone
+                
                 let ringtone = RingtoneMetadata.fromURL(destURL)
                 ringtones.append(ringtone)
-                selectedTab = 1 // Switch to Ringtones tab
+                selectedTab = 1 
                 print("[ContentView] Added ringtone: \(ringtone.name)")
                 
-                // Auto-inject ringtone
+                
                 autoInjectRingtones([ringtone])
             } else if ["mp3", "m4a", "wav", "flac", "aiff"].contains(ext) {
-                // It's a song
+                
                 Task {
                     if let song = try? await SongMetadata.fromURL(destURL) {
                         await MainActor.run {
                             songs.append(song)
-                            selectedTab = 0 // Switch to Music tab
+                            selectedTab = 0 
                             print("[ContentView] Added song: \(song.title)")
                             
-                            // Auto-inject song
+                            
                             autoInjectSongs([song])
                         }
                     }
@@ -147,7 +147,7 @@ struct ContentView: View {
         }
     }
     
-    // MARK: - Auto Inject
+    
     private func autoInjectSongs(_ songsToInject: [SongMetadata]) {
         guard manager.heartbeatReady else {
             status = "Device not connected"
@@ -167,7 +167,7 @@ struct ContentView: View {
                 self.isInjecting = false
                 if success {
                     self.status = "Injected successfully!"
-                    // Done, clear them out
+                    
                     for song in songsToInject {
                         self.songs.removeAll { $0.id == song.id }
                     }
@@ -188,7 +188,7 @@ struct ContentView: View {
         isInjecting = true
         status = "Auto-injecting ringtone..."
         
-        // Injector expects SongMetadata so we wrap it
+        
         let songs = ringtonesToInject.map { ringtone in
             SongMetadata(
                 localURL: ringtone.url,
@@ -213,7 +213,7 @@ struct ContentView: View {
                 self.isInjecting = false
                 if success {
                     self.status = "Ringtone injected!"
-                    // Clear them out
+                    
                     for ringtone in ringtonesToInject {
                         self.ringtones.removeAll { $0.id == ringtone.id }
                     }
@@ -224,17 +224,17 @@ struct ContentView: View {
         })
     }
     
-    // MARK: - Share Extension Integration
+    
     private func checkPendingInjections() {
         guard let defaults = UserDefaults(suiteName: DeviceManager.appGroupID) else { return }
         guard let pendingFiles = defaults.stringArray(forKey: "pendingInjections"), !pendingFiles.isEmpty else { return }
         guard let containerURL = DeviceManager.sharedContainerURL else { return }
         
-        // Clear the pending list first
+        
         defaults.removeObject(forKey: "pendingInjections")
         defaults.synchronize()
         
-        // Load the files as SongMetadata or RingtoneMetadata
+        
         Task {
             for filename in pendingFiles {
                 let fileURL = containerURL.appendingPathComponent(filename)
@@ -243,18 +243,18 @@ struct ContentView: View {
                 let ext = fileURL.pathExtension.lowercased()
                 
                 if ext == "m4r" {
-                    // Handle as ringtone
+                    
                     let ringtone = RingtoneMetadata.fromURL(fileURL)
                     await MainActor.run {
                         ringtones.append(ringtone)
-                        selectedTab = 1 // Switch to Ringtones tab
+                        selectedTab = 1 
                     }
                 } else if ["mp3", "m4a", "wav", "flac", "aiff"].contains(ext) {
-                    // Handle as music
+                    
                     if let song = try? await SongMetadata.fromURL(fileURL) {
                         await MainActor.run {
                             songs.append(song)
-                            selectedTab = 0 // Switch to Music tab
+                            selectedTab = 0 
                         }
                     }
                 }
@@ -263,14 +263,14 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Floating Tab Bar
+
 
 struct FloatingTabBar: View {
     @Binding var selectedTab: Int
     
     var body: some View {
         HStack(spacing: 0) {
-            // Music Tab
+            
             TabBarButton(
                 icon: "music.note",
                 title: "Music",
@@ -281,7 +281,7 @@ struct FloatingTabBar: View {
             
 
             
-            // Ringtones Tab
+            
             TabBarButton(
                 icon: "bell.badge.fill",
                 title: "Ringtones",
@@ -290,7 +290,7 @@ struct FloatingTabBar: View {
                 selectedTab = 1
             }
             
-            // Settings Tab
+            
             TabBarButton(
                 icon: "gearshape.fill",
                 title: "Settings",
@@ -337,7 +337,7 @@ struct TabBarButton: View {
     }
 }
 
-// MARK: - UIKit Document Picker Wrapper
+
 
 struct DocumentPicker: UIViewControllerRepresentable {
     let types: [UTType]
