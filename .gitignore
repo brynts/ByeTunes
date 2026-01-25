@@ -1,8 +1,9 @@
-
-# Mac OS X
-.DS_Store
-
 # Xcode
+.DS_Store
+*.swp
+*.lock
+*~
+DerivedData/
 build/
 *.pbxuser
 !default.pbxuser
@@ -15,11 +16,6 @@ build/
 xcuserdata/
 *.xccheckout
 *.moved-aside
-DerivedData/
-*.hmap
-*.ipa
-*.xg
-*.xcresult
 *.xcuserstate
 
 # Swift Package Manager
