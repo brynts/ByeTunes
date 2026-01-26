@@ -86,17 +86,9 @@ struct SongMetadata: Identifiable {
         var lyrics: String?
         
         
-        if filenameWithoutExt.contains(" - ") {
-            let parts = filenameWithoutExt.components(separatedBy: " - ")
-            if parts.count >= 2 {
-                
-                title = parts[0].trimmingCharacters(in: .whitespaces)
-                artist = parts[1].trimmingCharacters(in: .whitespaces)
-            }
-        }
-        
         
         let commonMetadata = try await asset.load(.commonMetadata)
+
         
         for item in commonMetadata {
             guard let key = item.commonKey else { continue }
@@ -241,6 +233,41 @@ struct SongMetadata: Identifiable {
         
         if let aa = albumArtist, (aa.isEmpty || aa.lowercased() == "unknown artist") {
             albumArtist = nil
+        }
+
+        // Fallback: If title extraction failed or is still just the filename, try parsing the filename
+        if title == filenameWithoutExt && filenameWithoutExt.contains(" - ") {
+             let parts = filenameWithoutExt.components(separatedBy: " - ")
+             
+             // Check for "01 - Artist - Title" format (3 parts)
+             if parts.count >= 3 {
+                 // Check if first part is a number (Track Number)
+                 if let trackNum = Int(parts[0]) {
+                     trackNumber = trackNum
+                     artist = parts[1].trimmingCharacters(in: .whitespaces)
+                     title = parts[2].trimmingCharacters(in: .whitespaces)
+                     print("[SongMetadata] Parsed filename (Track - Artist - Title): \(filenameWithoutExt)")
+                 } else {
+                     // Fallback for "Artist - Album - Title" or similar?
+                     // For now, assume standard "Artist - Title" if 3 parts but first isn't number
+                     artist = parts[0].trimmingCharacters(in: .whitespaces)
+                     title = parts[1].trimmingCharacters(in: .whitespaces)
+                 }
+             }
+             // Check for "Artist - Title" or "01 - Title" format (2 parts)
+             else if parts.count == 2 {
+                 // If first part is a number, treat as "Track - Title"
+                 if let trackNum = Int(parts[0]) {
+                     trackNumber = trackNum
+                     title = parts[1].trimmingCharacters(in: .whitespaces)
+                     print("[SongMetadata] Parsed filename (Track - Title): \(filenameWithoutExt)")
+                 } else {
+                     // Assume "Artist - Title"
+                     artist = parts[0].trimmingCharacters(in: .whitespaces)
+                     title = parts[1].trimmingCharacters(in: .whitespaces)
+                     print("[SongMetadata] Parsed filename (Artist - Title): \(filenameWithoutExt)")
+                 }
+             }
         }
         
         print("[SongMetadata] Final: title=\(title), artist=\(artist), album=\(album), track=\(trackNumber ?? 0)/\(trackCount ?? 0)")
