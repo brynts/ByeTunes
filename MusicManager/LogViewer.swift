@@ -4,6 +4,9 @@ struct LogViewer: View {
     @ObservedObject var logger = Logger.shared
     @Environment(\.presentationMode) var presentationMode
     
+    @State private var showingShareSheet = false
+    @State private var logURL: URL?
+    
     var body: some View {
         NavigationView {
             ScrollViewReader { proxy in
@@ -35,23 +38,32 @@ struct LogViewer: View {
                 
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: {
-                        shareLogs()
+                        if let url = logger.saveLogs() {
+                            self.logURL = url
+                            self.showingShareSheet = true
+                        }
                     }) {
                         Image(systemName: "square.and.arrow.up")
                     }
                 }
             }
-        }
-    }
-    
-    func shareLogs() {
-        if let url = logger.saveLogs() {
-            let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-            
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController {
-                rootVC.present(activityVC, animated: true, completion: nil)
+            .sheet(isPresented: $showingShareSheet) {
+                if let url = logURL {
+                    LogShareSheet(activityItems: [url])
+                }
             }
         }
     }
+}
+
+struct LogShareSheet: UIViewControllerRepresentable {
+    var activityItems: [Any]
+    var applicationActivities: [UIActivity]? = nil
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

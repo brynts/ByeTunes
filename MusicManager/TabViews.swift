@@ -33,10 +33,13 @@ struct LegacyTabBarView: View {
                     )
                 }
             }
-            .padding(.bottom, 80)
-            
-            FloatingTabBar(selectedTab: $selectedTab)
-                .padding(.bottom, 0)
+            .safeAreaInset(edge: .bottom) {
+                 Color.clear.frame(height: 80)
+            }
+            .overlay(alignment: .bottom) {
+                FloatingTabBar(selectedTab: $selectedTab)
+                    .padding(.bottom, 0)
+            }
         }
         .sheet(isPresented: $showingLogViewer) {
             LogViewer()
