@@ -30,8 +30,8 @@ struct SongMetadata: Identifiable {
     
     
     static func generateRemoteFilename(withExtension ext: String? = nil) -> String {
-        let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        let randomName = String((0..<4).map { _ in letters.randomElement()! })
+        let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        let randomName = String((0..<12).map { _ in letters.randomElement()! })
         let e = (ext?.isEmpty == false) ? ext!.lowercased() : "mp3"
         return "\(randomName).\(e)"
     }
