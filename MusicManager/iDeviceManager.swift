@@ -18,7 +18,7 @@ typealias IdeviceErrorCode = UnsafeMutablePointer<IdeviceFfiError>?
 let IdeviceSuccess: IdeviceErrorCode = nil
 
 
-private let BUILD_VERSION = "v1.0.8-DEBUG"
+private let BUILD_VERSION = "v1.0.1"
 
 class DeviceManager: ObservableObject {
     @Published var heartbeatReady: Bool = false
@@ -443,15 +443,16 @@ class DeviceManager: ObservableObject {
             }
             
             
-            var dataPtr: UnsafeMutablePointer<UInt8>?
-            var length: Int = 0
+            var dataPtr: UnsafeMutablePointer<UInt8>? = nil
+            var bytesRead: Int = 0
+            let readSize: Int = 1024 * 1024
             
-            let err = afc_file_read(file, &dataPtr, &length)
+            let err = afc_file_read(file, &dataPtr, readSize, &bytesRead)
             
-            if err == nil, let dataPtr = dataPtr, length > 0 {
-                let data = Data(bytes: dataPtr, count: length)
-                Logger.shared.log("[DeviceManager] Downloaded \(length) bytes from \(remotePath)")
-                afc_file_read_data_free(dataPtr, length)
+            if err == nil, let dataPtr = dataPtr, bytesRead > 0 {
+                let data = Data(bytes: dataPtr, count: bytesRead)
+                Logger.shared.log("[DeviceManager] Downloaded \(bytesRead) bytes from \(remotePath)")
+                afc_file_read_data_free(dataPtr, bytesRead)
                 afc_file_close(file)
                 afc_client_free(afc)
                 completion(data)

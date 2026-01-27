@@ -73,7 +73,8 @@ struct OnboardingView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         StepRow(number: "1", text: "Export pairing file from computer", isLast: false)
                         StepRow(number: "2", text: "Transfer file to this iPhone", isLast: false)
-                        StepRow(number: "3", text: "Tap button below to import", isLast: true)
+                        StepRow(number: "3", text: "Connect to your Tunnel VPN", isLast: false)
+                        StepRow(number: "4", text: "Tap button below to import", isLast: true)
                     }
                     
                     Divider()
