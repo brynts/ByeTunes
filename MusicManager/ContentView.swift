@@ -12,6 +12,13 @@ struct ContentView: View {
     @State private var showSplash = true
     @State private var showingLogViewer = false
     
+    // Detect "iOS 26" (GlassUI)
+    // Since we can't use #available(iOS 26, *), we check ProcessInfo major version
+    private var isIOS26OrLater: Bool {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return version.majorVersion >= 26
+    }
+    
     var body: some View {
         ZStack {
             if showSplash {
@@ -22,50 +29,34 @@ struct ContentView: View {
             
             if !showSplash {
                 Group {
-            if hasCompletedOnboarding {
-                
-                ZStack(alignment: .bottom) {
-                    
-                    Color(.systemGroupedBackground)
-                        .ignoresSafeArea()
-                    
-                    Group {
-                        if selectedTab == 0 {
-                            MusicView(
+                    if hasCompletedOnboarding {
+                        if isIOS26OrLater {
+                            ModernTabView(
                                 manager: manager,
                                 songs: $songs,
+                                ringtones: $ringtones,
                                 isInjecting: $isInjecting,
-                                status: $status
+                                status: $status,
+                                selectedTab: $selectedTab,
+                                showingLogViewer: $showingLogViewer
                             )
-                        } else if selectedTab == 1 {
-                            RingtonesView(manager: manager, ringtones: $ringtones)
                         } else {
-                            SettingsView(
+                            LegacyTabBarView(
                                 manager: manager,
-                                status: $status
+                                songs: $songs,
+                                ringtones: $ringtones,
+                                isInjecting: $isInjecting,
+                                status: $status,
+                                selectedTab: $selectedTab,
+                                showingLogViewer: $showingLogViewer
                             )
                         }
+                    } else {
+                        OnboardingView(
+                            manager: manager,
+                            isComplete: $hasCompletedOnboarding
+                        )
                     }
-                    .padding(.bottom, 80)
-                    
-                    FloatingTabBar(selectedTab: $selectedTab)
-                        .padding(.bottom, 0)
-                }
-                .sheet(isPresented: $showingLogViewer) {
-                    LogViewer()
-                }
-                .ignoresSafeArea(.keyboard)
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .scale(scale: 0.8)),
-                    removal: .opacity.combined(with: .scale(scale: 1.2))
-                ))
-            } else {
-                
-                OnboardingView(
-                    manager: manager,
-                    isComplete: $hasCompletedOnboarding
-                )
-            }
                 }
             }
         }
