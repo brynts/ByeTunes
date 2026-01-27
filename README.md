@@ -36,16 +36,42 @@ You can find idevice and compile it from here: [https://github.com/jkcoxson/idev
 
 ### Build Steps
 
-1.  Clone the repo:
+1.  Install Rust:
     ```bash
-    git clone https://github.com/EduAlexxis/ByeTunes.git
-    cd ByeTunes
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
     ```
-2.  **Add the missing libraries**:
-    -   Copy `libidevice_ffi.a` and `idevice.h` into the `MusicManager/` folder.
-3.  Open `MusicManager.xcodeproj` in Xcode.
-4.  Switch the Signing Team to your own Apple ID.
-5.  Build & Run on your device!
+2.  Add the ios Arch:
+    ```bash
+    rustup target add aarch64-apple-ios
+    ```
+    
+3.  Install Xcode Command Line Tools if you don't have it already installed:
+    ```bash
+    xcode-select --install
+    ```
+
+4.  Clone the repo:
+    ```bash
+    git clone https://github.com/jkcoxson/idevice
+    ```
+
+5.  Set a deployment target:
+    ```bash
+    export IPHONEOS_DEPLOYMENT_TARGET=xx.x
+    ```
+
+6.  Run the cargo build:
+    ```bash
+    cargo build --release --package idevice-ffi --target aarch64-apple-ios
+    ```
+Inside the idevice folder find: idevice.h and libidevice_ffi.a. Move them inside the project in Xcode, make sure you create **Bridging-Header.h**
+Inside there make sure you add:
+
+ ```bash
+    #import "idevice.h"
+```
+
+**In Project Settings > Build Phases > Link Binary With Libraries, make sure libidevice_ffi.a is listed.**
 
 ## How to Use
 
