@@ -444,15 +444,14 @@ class DeviceManager: ObservableObject {
             
             
             var dataPtr: UnsafeMutablePointer<UInt8>? = nil
-            var bytesRead: Int = 0
-            let readSize: Int = 1024 * 1024
+            var length: Int = 0
             
-            let err = afc_file_read(file, &dataPtr, readSize, &bytesRead)
+            let err = afc_file_read(file, &dataPtr, &length)
             
-            if err == nil, let dataPtr = dataPtr, bytesRead > 0 {
-                let data = Data(bytes: dataPtr, count: bytesRead)
-                Logger.shared.log("[DeviceManager] Downloaded \(bytesRead) bytes from \(remotePath)")
-                afc_file_read_data_free(dataPtr, bytesRead)
+            if err == nil, let dataPtr = dataPtr, length > 0 {
+                let data = Data(bytes: dataPtr, count: length)
+                Logger.shared.log("[DeviceManager] Downloaded \(length) bytes from \(remotePath)")
+                afc_file_read_data_free(dataPtr, length)
                 afc_file_close(file)
                 afc_client_free(afc)
                 completion(data)

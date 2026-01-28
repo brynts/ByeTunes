@@ -34,7 +34,7 @@ struct MusicView: View {
 
     
     static var supportedAudioTypes: [UTType] {
-        var types: [UTType] = [.mp3, .wav, .aiff, .mpeg4Audio, .audio]
+        var types: [UTType] = [.mp3, .wav, .aiff, .mpeg4Audio, .audio, .folder]
         if let flac = UTType(filenameExtension: "flac") { types.append(flac) }
         if let m4a = UTType(filenameExtension: "m4a") { types.append(m4a) }
         return types
@@ -362,8 +362,8 @@ struct MusicView: View {
                     showingPlaylistSheet = false
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
-                        .foregroundColor(.secondary.opacity(0.6))
+                    .font(.title2)
+                    .foregroundColor(.secondary.opacity(0.6))
                 }
             }
             .padding([.top, .horizontal], 20)
@@ -463,25 +463,62 @@ struct MusicView: View {
         
         let metadataSource = UserDefaults.standard.string(forKey: "metadataSource") ?? "local"
         let useiTunes = (metadataSource == "itunes")
-        let autofetch = UserDefaults.standard.bool(forKey: "autofetchMetadata") 
+        let autofetch = UserDefaults.standard.bool(forKey: "autofetchMetadata")
         
+        // Capture documents directory on Main Actor (safe here) to usage in background Task
+        let documentsDirectory = URL.documentsDirectory
         
         Task {
             var importedSongs: [SongMetadata] = []
             
+            // Helper function to process a single file URL
+            func processFile(_ url: URL) async {
+                 // Skip non-audio files if we are scanning a folder, but DocumentPicker usually filters for us
+                 // However, when recursively scanning, we need to be careful.
+                 let ext = url.pathExtension.lowercased()
+                 if ["mp3", "wav", "aiff", "m4a", "flac"].contains(ext) {
+                     let destURL = documentsDirectory.appendingPathComponent(url.lastPathComponent)
+                     // Overwrite existing
+                     try? FileManager.default.removeItem(at: destURL)
+                     try? FileManager.default.copyItem(at: url, to: destURL)
+                     
+                     if var song = try? await SongMetadata.fromURL(destURL) {
+                         if useiTunes && autofetch {
+                             song = await SongMetadata.enrichWithiTunesMetadata(song)
+                         }
+                         importedSongs.append(song)
+                     }
+                 }
+            }
+            
             for url in urls {
-                // Since we are using asCopy: true, we don't need security scoped access
+                Logger.shared.log("[MusicView] Processing input URL: \(url.path)")
                 
-                let destURL = URL.documentsDirectory.appendingPathComponent(url.lastPathComponent)
-                try? FileManager.default.removeItem(at: destURL)
-                try? FileManager.default.copyItem(at: url, to: destURL)
-                
-                if var song = try? await SongMetadata.fromURL(destURL) {
+                // Check if directory
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                    Logger.shared.log("[MusicView] URL is a directory. Scanning recursively...")
+                    // Recursive scan
+                    // Note: accessing security scoped resource for folder
+                    // Recursive scan
+                    // Note: accessing security scoped resource for folder
+                    // With asCopy: true, the folder is in our sandbox, so startAccessing might return false.
+                    // We attempt it, but proceed regardless.
+                    let accessGranted = url.startAccessingSecurityScopedResource()
+                    defer { if accessGranted { url.stopAccessingSecurityScopedResource() } }
                     
-                    if useiTunes && autofetch {
-                        song = await SongMetadata.enrichWithiTunesMetadata(song)
+                    let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
+                    var fileCount = 0
+                    while let fileURL = enumerator?.nextObject() as? URL {
+                        fileCount += 1
+                        if fileCount % 10 == 0 { Logger.shared.log("[MusicView] Scanned \(fileCount) files...") }
+                        await processFile(fileURL)
                     }
-                    importedSongs.append(song)
+                    Logger.shared.log("[MusicView] Finished scanning directory. Total files checked: \(fileCount)")
+                } else {
+                    // Single file
+                    Logger.shared.log("[MusicView] URL is a single file.")
+                    await processFile(url)
                 }
             }
             
@@ -489,9 +526,19 @@ struct MusicView: View {
                 withAnimation(.easeOut(duration: 0.2)) {
                     songs.append(contentsOf: importedSongs)
                 }
+                
+                // Show toast if many songs added
+                if importedSongs.count > 0 {
+                    let title = importedSongs.count == 1 ? "Imported 1 Song" : "Imported \(importedSongs.count) Songs"
+                    self.showToast(title: title, icon: "checkmark.circle.fill")
+                } else {
+                    Logger.shared.log("[MusicView] No songs imported from selection")
+                    self.showToast(title: "No songs found", icon: "exclamationmark.triangle")
+                }
             }
         }
     }
+
     
     func injectSongs() {
         guard !songs.isEmpty else { return }
