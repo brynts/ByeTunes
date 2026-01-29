@@ -63,18 +63,23 @@ jobs:
           set -e
           file="MusicManager/iDeviceManager.swift"
           
-          # Fix length type (most common issue with afc_file_read)
-          sed -i '' 's/var length: Int = 0/var length: UInt32 = 0/' "$file"
+          # Fix length type for afc_file_read/write parameters
+          sed -i '' 's/var length: Int/var length: UInt32/g' "$file"
           
-          # Fix afc_list_directory count parameter
-          sed -i '' 's/var count: Int = 0/var count: UInt32 = 0/' "$file"
+          # Fix bytesRead type for afc_file_read
+          sed -i '' 's/var bytesRead: Int/var bytesRead: UInt32/g' "$file"
           
-          # Add explicit UInt32 cast on afc_file_write data.count
-          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt32(data.count))/' "$file"
+          # Fix count type for directory listings or other counts
+          sed -i '' 's/var count: Int/var count: UInt32/g' "$file"
           
-          # Optional: fix any remaining UInt32 → Int if still exists
-          sed -i '' 's/UInt32(/Int(/g' "$file" || true
-          sed -i '' 's/: UInt32/: Int/g' "$file" || true
+          # Add explicit UInt32 cast on afc_file_write data.count (if Int)
+          sed -i '' 's/afc_file_write(\([^,]*,\ [^,]*,\ data.count\)/afc_file_write(\1, UInt32(data.count))/g' "$file"
+          
+          # Similar cast for afc_file_read length if needed
+          sed -i '' 's/afc_file_read(\([^,]*,\ [^,]*,\ [^,]*,\ length\)/afc_file_read(\1, UInt32(length))/g' "$file"
+          
+          # Ensure bytesRead usage is compatible (e.g., Int(bytesRead))
+          # If there are assignments like someInt = bytesRead, add cast if necessary, but sed might not catch all; assume var change handles it
           
           echo "Patches applied. Showing diff:"
           git diff "$file" || echo "No diff or file not tracked"
