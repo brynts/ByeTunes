@@ -37,55 +37,78 @@ jobs:
           export CC="$(xcrun --sdk iphoneos -f clang)"
           cargo build --release --target aarch64-apple-ios
 
-      - name: Copy idevice artifacts to project
+      - name: Copy idevice artifacts
         run: |
           set -e
           mkdir -p MusicManager
-          LIB=$(find idevice -type f -name "libidevice*.a" | head -n 1)
+          LIB=$(find idevice/target/aarch64-apple-ios/release -type f -name "*idevice*.a" | head -n 1)
           HDR=$(find idevice -type f -name "idevice.h" | head -n 1)
           if [ -z "$LIB" ] || [ -z "$HDR" ]; then
             echo "Error: Could not find libidevice*.a or idevice.h"
             exit 1
           fi
-          cp "$LIB" MusicManager/
-          cp "$HDR" MusicManager/
+          cp "$LIB" MusicManager/libidevice_ffi.a
+          cp "$HDR" MusicManager/idevice.h
           ls -la MusicManager/
 
       - name: Create Bridging Header
         run: |
-          mkdir -p MusicManager
           cat > MusicManager/Bridging-Header.h << 'EOF'
           #import "idevice.h"
           EOF
 
-      - name: Apply type patches to iDeviceManager.swift
+      - name: Patch iDeviceManager.swift for UInt32 types (AFC fixes)
         run: |
           set -e
           file="MusicManager/iDeviceManager.swift"
-          
-          # Fix length type for afc_file_read/write parameters
-          sed -i '' 's/var length: Int/var length: UInt32/g' "$file"
-          
-          # Fix bytesRead type for afc_file_read
-          sed -i '' 's/var bytesRead: Int/var bytesRead: UInt32/g' "$file"
-          
-          # Fix count type for directory listings or other counts
-          sed -i '' 's/var count: Int/var count: UInt32/g' "$file"
-          
-          # Add explicit UInt32 cast on afc_file_write data.count (if Int)
-          sed -i '' 's/afc_file_write(\([^,]*,\ [^,]*,\ data.count\)/afc_file_write(\1, UInt32(data.count))/g' "$file"
-          
-          # Similar cast for afc_file_read length if needed
-          sed -i '' 's/afc_file_read(\([^,]*,\ [^,]*,\ [^,]*,\ length\)/afc_file_read(\1, UInt32(length))/g' "$file"
-          
-          # Ensure bytesRead usage is compatible (e.g., Int(bytesRead))
-          # If there are assignments like someInt = bytesRead, add cast if necessary, but sed might not catch all; assume var change handles it
-          
-          echo "Patches applied. Showing diff:"
-          git diff "$file" || echo "No diff or file not tracked"
+          if [ ! -f "$file" ]; then
+            echo "Error: $file not found!"
+            exit 1
+          fi
 
-      - name: Build the app
+          echo "Before patching:"
+          grep -C 5 "afc_file_read" "$file" || echo "No afc_file_read found yet"
+          grep -C 5 "var length:" "$file" || echo "No length var found yet"
+
+          # Change all var length: Int to UInt32 (covers downloadFileFromDevice and others)
+          sed -i '' 's/var length: *Int/var length: UInt32/g' "$file"
+
+          # Change var bytesRead: Int to UInt32 if exists
+          sed -i '' 's/var bytesRead: *Int/var bytesRead: UInt32/g' "$file"
+
+          # Fix afc_file_read call: if &length, add UnsafeMutablePointer<UInt32>(&length)
+          # Pattern for calls like afc_file_read(file, dataPtr, length) – assume missing bytes_read, but from code it's afc_file_read(file, dataPtr, length)
+          # From your code, it's let err = afc_file_read(file, dataPtr, length) – but header expects 5 params: client, handle, data, length, bytes_read
+          # Wait, your code is missing the last param! That's likely the "Missing argument for parameter #4" error.
+          # So, add the missing bytes_read param.
+
+          # First, insert var bytesRead: UInt32 = 0 before the call if not there
+          sed -i '' '/let err = afc_file_read(file, dataPtr, length)/i \
+          var bytesRead: UInt32 = 0' "$file"
+
+          # Then, modify the call to include &bytesRead
+          sed -i '' 's/let err = afc_file_read(file, dataPtr, length)/let err = afc_file_read(file, dataPtr, UInt32(length), &bytesRead)/g' "$file"
+
+          # Handle loop condition: if let dataPtr = dataPtr, bytesRead > 0 { data.append(Data(bytes: dataPtr, count: Int(bytesRead))) }
+          # Ensure bytesRead cast to Int for count
+          sed -i '' 's/count: bytesRead/count: Int(bytesRead)/g' "$file"
+
+          # Similar for afc_file_write: cast data.count to UInt32
+          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt32(data.count))/g' "$file"
+
+          # If any other length assignments, handle casts
+          sed -i '' 's/length = CHUNK_SIZE/length = UInt32(CHUNK_SIZE)/g' "$file"  # Assume CHUNK_SIZE is Int
+
+          echo "After patching:"
+          grep -C 5 "afc_file_read" "$file"
+          grep -C 5 "var length:" "$file"
+
+          echo "Full diff:"
+          git diff "$file" || echo "No diff"
+
+      - name: Build the app with symbols for larger IPA
         run: |
+          set -o pipefail
           xcodebuild \
             -project MusicManager.xcodeproj \
             -scheme "$SCHEME" \
@@ -96,35 +119,32 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_IDENTITY="" \
             LIBRARY_SEARCH_PATHS="$PWD/MusicManager" \
-            OTHER_LDFLAGS="-lidevice_ffi" \
+            OTHER_LDFLAGS="-lidevice_ffi -ObjC -all_load" \
+            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
             build | xcpretty || exit ${PIPESTATUS[0]}
-
-      - name: Locate built .app
-        id: find-app
-        run: |
-          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -type d -name "MusicManager.app" -print -quit 2>/dev/null || true)
-          if [ -z "$APP_PATH" ]; then
-            echo "Error: MusicManager.app not found in DerivedData"
-            exit 1
-          fi
-          echo "APP_PATH=$APP_PATH" >> $GITHUB_OUTPUT
-          echo "Found app at: $APP_PATH"
 
       - name: Package IPA
         run: |
+          APP=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 4 -type d -name "*.app" -path "*/MusicManager.app" | head -n 1)
+          if [ -z "$APP" ]; then
+            echo "Error: *.app not found in DerivedData"
+            exit 1
+          fi
           mkdir -p Payload
-          cp -R "${{ steps.find-app.outputs.APP_PATH }}" Payload/
+          cp -R "$APP" Payload/
           zip -r ByeTunes.ipa Payload
           ls -lh ByeTunes.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ByeTunes-ipa
+          path: ByeTunes.ipa
 
       - name: Create Draft Release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           tag_name: build-${{ github.run_number }}
-          name: ByeTunes CI Build #${{ github.run_number }}
-          body: |
-            Auto-built from branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Runner: macos-latest
+          name: ByeTunes CI Build ${{ github.run_number }}
           files: ByeTunes.ipa
