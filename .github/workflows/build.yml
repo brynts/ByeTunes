@@ -67,46 +67,32 @@ jobs:
           fi
 
           echo "Before patching:"
-          grep -C 5 "afc_file_read" "$file" || echo "No afc_file_read found yet"
-          grep -C 5 "var length:" "$file" || echo "No length var found yet"
+          grep -A 10 -B 5 "afc_file_read" "$file" || echo "No afc_file_read found yet"
 
-          # Change all var length: Int to UInt32 (covers downloadFileFromDevice and others)
-          sed -i '' 's/var length: *Int/var length: UInt32/g' "$file"
+          # Change var length: Int → UInt32
+          sed -i '' 's/var length: Int/var length: UInt32/g' "$file"
 
-          # Change var bytesRead: Int to UInt32 if exists
-          sed -i '' 's/var bytesRead: *Int/var bytesRead: UInt32/g' "$file"
+          # Add missing bytes_read param to afc_file_read (assume it's needed; adjust if binding differs)
+          sed -i '' 's/afc_file_read(file, &dataPtr, &length)/afc_file_read(file, &dataPtr, &length, nil)/g' "$file"  # nil if optional
 
-          # Fix afc_file_read call: if &length, add UnsafeMutablePointer<UInt32>(&length)
-          # Pattern for calls like afc_file_read(file, dataPtr, length) – assume missing bytes_read, but from code it's afc_file_read(file, dataPtr, length)
-          # From your code, it's let err = afc_file_read(file, dataPtr, length) – but header expects 5 params: client, handle, data, length, bytes_read
-          # Wait, your code is missing the last param! That's likely the "Missing argument for parameter #4" error.
-          # So, add the missing bytes_read param.
+          # Cast length to UInt32 in calls
+          sed -i '' 's/afc_file_read(\([^,]*,\ [^,]*,\ [^,]*,\ length\)/afc_file_read(\1, UInt32(length))/g' "$file"
+          sed -i '' 's/afc_file_read(\([^,]*,\ [^,]*,\ [^,]*,\ [^,]*,\ length\)/afc_file_read(\1, UInt32(length))/g' "$file"  # If 5 args
 
-          # First, insert var bytesRead: UInt32 = 0 before the call if not there
-          sed -i '' '/let err = afc_file_read(file, dataPtr, length)/i \
-          var bytesRead: UInt32 = 0' "$file"
+          # For afc_file_write, cast data.count to UInt32 and ensure Int → UInt32
+          sed -i '' 's/afc_file_write(\([^,]*,\ [^,]*,\ data.count\)/afc_file_write(\1, UInt32(data.count))/g' "$file"
+          sed -i '' 's/afc_file_write(\([^,]*,\ [^,]*,\ length\)/afc_file_write(\1, UInt32(length))/g' "$file"
 
-          # Then, modify the call to include &bytesRead
-          sed -i '' 's/let err = afc_file_read(file, dataPtr, length)/let err = afc_file_read(file, dataPtr, UInt32(length), &bytesRead)/g' "$file"
-
-          # Handle loop condition: if let dataPtr = dataPtr, bytesRead > 0 { data.append(Data(bytes: dataPtr, count: Int(bytesRead))) }
-          # Ensure bytesRead cast to Int for count
-          sed -i '' 's/count: bytesRead/count: Int(bytesRead)/g' "$file"
-
-          # Similar for afc_file_write: cast data.count to UInt32
-          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt32(data.count))/g' "$file"
-
-          # If any other length assignments, handle casts
-          sed -i '' 's/length = CHUNK_SIZE/length = UInt32(CHUNK_SIZE)/g' "$file"  # Assume CHUNK_SIZE is Int
+          # Fix pointer types if &length is passed
+          sed -i '' 's/&length/UnsafeMutablePointer<UInt32>(&length)/g' "$file"
 
           echo "After patching:"
-          grep -C 5 "afc_file_read" "$file"
-          grep -C 5 "var length:" "$file"
+          grep -A 10 -B 5 "afc_file_read" "$file" || echo "No matches after patch"
 
           echo "Full diff:"
           git diff "$file" || echo "No diff"
 
-      - name: Build the app with symbols for larger IPA
+      - name: Build the app
         run: |
           set -o pipefail
           xcodebuild \
@@ -119,15 +105,14 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_IDENTITY="" \
             LIBRARY_SEARCH_PATHS="$PWD/MusicManager" \
-            OTHER_LDFLAGS="-lidevice_ffi -ObjC -all_load" \
-            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
+            OTHER_LDFLAGS="-lidevice_ffi -ObjC" \
             build | xcpretty || exit ${PIPESTATUS[0]}
 
       - name: Package IPA
         run: |
-          APP=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 4 -type d -name "*.app" -path "*/MusicManager.app" | head -n 1)
+          APP=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 4 -type d -name "MusicManager.app" | head -n 1)
           if [ -z "$APP" ]; then
-            echo "Error: *.app not found in DerivedData"
+            echo "Error: MusicManager.app not found"
             exit 1
           fi
           mkdir -p Payload
