@@ -1,0 +1,125 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ build ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    env:
+      SCHEME: MusicManager
+      CONFIGURATION: Release
+      IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Clone idevice repo
+        run: git clone https://github.com/jkcoxson/idevice.git
+
+      - name: Build idevice for iOS
+        working-directory: idevice
+        run: |
+          export IPHONEOS_DEPLOYMENT_TARGET=18.0
+          export SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
+          export CC="$(xcrun --sdk iphoneos -f clang)"
+          cargo build --release --target aarch64-apple-ios
+
+      - name: Copy idevice artifacts to project
+        run: |
+          set -e
+          mkdir -p MusicManager
+          LIB=$(find idevice -type f -name "libidevice*.a" | head -n 1)
+          HDR=$(find idevice -type f -name "idevice.h" | head -n 1)
+          if [ -z "$LIB" ] || [ -z "$HDR" ]; then
+            echo "Error: Could not find libidevice*.a or idevice.h"
+            exit 1
+          fi
+          cp "$LIB" MusicManager/
+          cp "$HDR" MusicManager/
+          ls -la MusicManager/
+
+      - name: Create Bridging Header
+        run: |
+          mkdir -p MusicManager
+          cat > MusicManager/Bridging-Header.h << 'EOF'
+          #import "idevice.h"
+          EOF
+
+      - name: Apply type patches to iDeviceManager.swift
+        run: |
+          set -e
+          file="MusicManager/iDeviceManager.swift"
+          
+          # Fix length type (most common issue with afc_file_read)
+          sed -i '' 's/var length: Int = 0/var length: UInt32 = 0/' "$file"
+          
+          # Fix afc_list_directory count parameter
+          sed -i '' 's/var count: Int = 0/var count: UInt32 = 0/' "$file"
+          
+          # Add explicit UInt32 cast on afc_file_write data.count
+          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt32(data.count))/' "$file"
+          
+          # Optional: fix any remaining UInt32 → Int if still exists
+          sed -i '' 's/UInt32(/Int(/g' "$file" || true
+          sed -i '' 's/: UInt32/: Int/g' "$file" || true
+          
+          echo "Patches applied. Showing diff:"
+          git diff "$file" || echo "No diff or file not tracked"
+
+      - name: Build the app
+        run: |
+          xcodebuild \
+            -project MusicManager.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_IDENTITY="" \
+            LIBRARY_SEARCH_PATHS="$PWD/MusicManager" \
+            OTHER_LDFLAGS="-lidevice_ffi" \
+            build | xcpretty || exit ${PIPESTATUS[0]}
+
+      - name: Locate built .app
+        id: find-app
+        run: |
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -type d -name "MusicManager.app" -print -quit 2>/dev/null || true)
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: MusicManager.app not found in DerivedData"
+            exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_OUTPUT
+          echo "Found app at: $APP_PATH"
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R "${{ steps.find-app.outputs.APP_PATH }}" Payload/
+          zip -r ByeTunes.ipa Payload
+          ls -lh ByeTunes.ipa
+
+      - name: Create Draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: build-${{ github.run_number }}
+          name: ByeTunes CI Build #${{ github.run_number }}
+          body: |
+            Auto-built from branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Runner: macos-latest
+          files: ByeTunes.ipa
