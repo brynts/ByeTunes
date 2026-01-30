@@ -73,18 +73,20 @@ jobs:
           # Fixes: "generic parameter 'ContentType' could not be inferred"
           sed -i '' 's/data.withUnsafeBytes { buffer in/data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in/g' "$file"
 
-          # 2. Change var length declaration to UInt32 (safe)
+          # 2. Change var length declaration to UInt32 (safe base type for var)
           sed -i '' 's/var length: *Int/var length: UInt32/' "$file"
 
-          # 3. For afc_file_write: Add missing nil param
-          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt32(data.count), nil)/' "$file"
+          # 3. For afc_file_write: Add missing nil param & Use UInt (bukan UInt32)
+          # Matches line 248 and 361 in your file
+          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt(data.count), nil)/' "$file"
 
-          # 4. For afc_file_read: Add missing nil param AND handle the '&' pointer symbol
-          # CRITICAL FIX: Menggunakan escape sequence (\&) agar sed tidak menduplikasi match
-          sed -i '' 's/afc_file_read(file, &dataPtr, &length)/afc_file_read(file, \&dataPtr, UInt32(length), nil)/' "$file"
+          # 4. For afc_file_read: Add missing nil param, handle '&', & Use UInt (bukan UInt32)
+          # Matches line 449 in your file
+          # CRITICAL: Menggunakan escape sequence (\&) agar sed tidak menduplikasi match
+          sed -i '' 's/afc_file_read(file, &dataPtr, &length)/afc_file_read(file, \&dataPtr, UInt(length), nil)/' "$file"
           
-          # Fallback (juga di-escape untuk keamanan)
-          sed -i '' 's/afc_file_read(file, &dataPtr, length)/afc_file_read(file, \&dataPtr, UInt32(length), nil)/' "$file"
+          # Fallback pattern (just in case)
+          sed -i '' 's/afc_file_read(file, &dataPtr, length)/afc_file_read(file, \&dataPtr, UInt(length), nil)/' "$file"
 
           # 5. Clean up any broken pointer casts
           sed -i '' 's/UnsafeMutablePointer<UInt32>(, /UnsafeMutablePointer<UInt32>(/' "$file"
