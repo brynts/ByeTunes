@@ -73,19 +73,15 @@ jobs:
           # 1. Change var length declaration to UInt32 (safe)
           sed -i '' 's/var length: *Int/var length: UInt32/' "$file"
 
-          # 2. For afc_file_write: replace data.count with UInt32(data.count), but only the last arg
-          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt32(data.count))/' "$file"
+          # 2. For afc_file_write: change to afc_file_write(file, base, UInt32(data.count), nil) to add missing param
+          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt32(data.count), nil)/' "$file"
 
-          # 3. For afc_file_read: replace length with UInt32(length), assuming it's the last arg
-          sed -i '' 's/afc_file_read(file, &dataPtr, length)/afc_file_read(file, &dataPtr, UInt32(length))/' "$file"
+          # 3. For afc_file_read: change to afc_file_read(file, &dataPtr, UInt32(length), nil) to add missing param
+          sed -i '' 's/afc_file_read(file, &dataPtr, length)/afc_file_read(file, &dataPtr, UInt32(length), nil)/' "$file"
 
-          # 4. If &length is used as out-param, cast pointer
-          sed -i '' 's/&length/UnsafeMutablePointer<UInt32>(&length)/' "$file"
-
-          # 5. Clean up any broken commas or duplicates from previous runs
+          # 4. Clean up any broken pointer casts or commas
           sed -i '' 's/UnsafeMutablePointer<UInt32>(, /UnsafeMutablePointer<UInt32>(/' "$file"
-          sed -i '' 's/lengthlength/length/' "$file"
-          sed -i '' 's/UInt32(UnsafeMutablePointer<UInt32>/UnsafeMutablePointer<UInt32>/' "$file" || true
+          sed -i '' 's/&length length/UnsafeMutablePointer<UInt32>(&length)/' "$file" || true
 
           echo "=== AFTER PATCHING ==="
           grep -n -C 5 "afc_file_read" "$file" || echo "No afc_file_read after patch"
