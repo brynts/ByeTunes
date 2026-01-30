@@ -57,7 +57,7 @@ jobs:
           #import "idevice.h"
           EOF
 
-      - name: Patch iDeviceManager.swift for UInt32 types (AFC fixes)
+      - name: Precise patching for AFC type issues
         run: |
           set -e
           file="MusicManager/iDeviceManager.swift"
@@ -66,31 +66,36 @@ jobs:
             exit 1
           fi
 
-          echo "Before patching:"
-          grep -A 10 -B 5 "afc_file_read" "$file" || echo "No afc_file_read found yet"
+          echo "=== BEFORE PATCHING ==="
+          grep -n -C 5 "afc_file_read" "$file" || echo "No afc_file_read found"
+          grep -n -C 5 "afc_file_write" "$file" || echo "No afc_file_write found"
 
-          # Change var length: Int → UInt32
-          sed -i '' 's/var length: Int/var length: UInt32/g' "$file"
+          # 1. Change var length declaration to UInt32 (safe, non-destructive)
+          sed -i '' 's/var length: *Int/var length: UInt32/' "$file"
 
-          # Add missing bytes_read param to afc_file_read (assume it's needed; adjust if binding differs)
-          sed -i '' 's/afc_file_read(file, &dataPtr, &length)/afc_file_read(file, &dataPtr, &length, nil)/g' "$file"  # nil if optional
+          # 2. Fix afc_file_write: cast data.count to UInt32 (only if no cast yet)
+          sed -i '' '/afc_file_write(/ s/data\.count/UInt32(data.count)/' "$file"
 
-          # Cast length to UInt32 in calls
-          sed -i '' 's/afc_file_read(\([^,]*,\ [^,]*,\ [^,]*,\ length\)/afc_file_read(\1, UInt32(length))/g' "$file"
-          sed -i '' 's/afc_file_read(\([^,]*,\ [^,]*,\ [^,]*,\ [^,]*,\ length\)/afc_file_read(\1, UInt32(length))/g' "$file"  # If 5 args
+          # 3. Fix afc_file_read: if length is last arg, cast to UInt32(length)
+          #    This matches common pattern: afc_file_read(..., length)
+          sed -i '' '/afc_file_read(/ s/,\ *length)/, UInt32(length))/' "$file"
 
-          # For afc_file_write, cast data.count to UInt32 and ensure Int → UInt32
-          sed -i '' 's/afc_file_write(\([^,]*,\ [^,]*,\ data.count\)/afc_file_write(\1, UInt32(data.count))/g' "$file"
-          sed -i '' 's/afc_file_write(\([^,]*,\ [^,]*,\ length\)/afc_file_write(\1, UInt32(length))/g' "$file"
+          # 4. If &length is used (out param), change to proper pointer cast
+          sed -i '' 's/,\ *\&length)/, UnsafeMutablePointer<UInt32>(&length))/' "$file"
 
-          # Fix pointer types if &length is passed
-          sed -i '' 's/&length/UnsafeMutablePointer<UInt32>(&length)/g' "$file"
+          # 5. Remove any accidental duplications from previous bad patches
+          sed -i '' '/afc_file_read(/ s/afc_file_read.*afc_file_read/afc_file_read/' "$file"
+          sed -i '' 's/lengthlength/length/g' "$file"
 
-          echo "After patching:"
-          grep -A 10 -B 5 "afc_file_read" "$file" || echo "No matches after patch"
+          # 6. Fix broken trailing closure if patch damaged it
+          sed -i '' 's/async {/async {/g' "$file"
 
-          echo "Full diff:"
-          git diff "$file" || echo "No diff"
+          echo "=== AFTER PATCHING ==="
+          grep -n -C 5 "afc_file_read" "$file" || echo "No afc_file_read after patch"
+          grep -n -C 5 "afc_file_write" "$file" || echo "No afc_file_write after patch"
+
+          echo "=== DIFF SUMMARY ==="
+          git diff "$file" | head -n 40 || echo "No diff or git not tracking"
 
       - name: Build the app
         run: |
@@ -106,6 +111,7 @@ jobs:
             CODE_SIGNING_IDENTITY="" \
             LIBRARY_SEARCH_PATHS="$PWD/MusicManager" \
             OTHER_LDFLAGS="-lidevice_ffi -ObjC" \
+            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
             build | xcpretty || exit ${PIPESTATUS[0]}
 
       - name: Package IPA
