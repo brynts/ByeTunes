@@ -70,25 +70,22 @@ jobs:
           grep -n -C 5 "afc_file_read" "$file" || echo "No afc_file_read found"
           grep -n -C 5 "afc_file_write" "$file" || echo "No afc_file_write found"
 
-          # 1. Change var length declaration to UInt32 (safe, non-destructive)
+          # 1. Change var length declaration to UInt32 (safe)
           sed -i '' 's/var length: *Int/var length: UInt32/' "$file"
 
-          # 2. Fix afc_file_write: cast data.count to UInt32 (only if no cast yet)
-          sed -i '' '/afc_file_write(/ s/data\.count/UInt32(data.count)/' "$file"
+          # 2. For afc_file_write: replace data.count with UInt32(data.count), but only the last arg
+          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt32(data.count))/' "$file"
 
-          # 3. Fix afc_file_read: if length is last arg, cast to UInt32(length)
-          #    This matches common pattern: afc_file_read(..., length)
-          sed -i '' '/afc_file_read(/ s/,\ *length)/, UInt32(length))/' "$file"
+          # 3. For afc_file_read: replace length with UInt32(length), assuming it's the last arg
+          sed -i '' 's/afc_file_read(file, &dataPtr, length)/afc_file_read(file, &dataPtr, UInt32(length))/' "$file"
 
-          # 4. If &length is used (out param), change to proper pointer cast
-          sed -i '' 's/,\ *\&length)/, UnsafeMutablePointer<UInt32>(&length))/' "$file"
+          # 4. If &length is used as out-param, cast pointer
+          sed -i '' 's/&length/UnsafeMutablePointer<UInt32>(&length)/' "$file"
 
-          # 5. Remove any accidental duplications from previous bad patches
-          sed -i '' '/afc_file_read(/ s/afc_file_read.*afc_file_read/afc_file_read/' "$file"
-          sed -i '' 's/lengthlength/length/g' "$file"
-
-          # 6. Fix broken trailing closure if patch damaged it
-          sed -i '' 's/async {/async {/g' "$file"
+          # 5. Clean up any broken commas or duplicates from previous runs
+          sed -i '' 's/UnsafeMutablePointer<UInt32>(, /UnsafeMutablePointer<UInt32>(/' "$file"
+          sed -i '' 's/lengthlength/length/' "$file"
+          sed -i '' 's/UInt32(UnsafeMutablePointer<UInt32>/UnsafeMutablePointer<UInt32>/' "$file" || true
 
           echo "=== AFTER PATCHING ==="
           grep -n -C 5 "afc_file_read" "$file" || echo "No afc_file_read after patch"
