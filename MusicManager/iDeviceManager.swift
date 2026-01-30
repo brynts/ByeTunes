@@ -446,7 +446,7 @@ class DeviceManager: ObservableObject {
             var dataPtr: UnsafeMutablePointer<UInt8>? = nil
             var length: Int = 0
             
-            let err = afc_file_read(file, &dataPtr, &length)
+            let err = afc_file_read_entire(file, &dataPtr, &length)
             
             if err == nil, let dataPtr = dataPtr, length > 0 {
                 let data = Data(bytes: dataPtr, count: length)
