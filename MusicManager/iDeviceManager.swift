@@ -269,9 +269,9 @@ class DeviceManager: ObservableObject {
             
             if let data = try? Data(contentsOf: localURL) {
                 
-                data.withUnsafeBytes { buffer in
+                data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
                     if let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                        afc_file_write(file, base, data.count)
+                        afc_file_write(file, UInt(data.count), nil)
                     }
                 }
                 
@@ -444,12 +444,12 @@ class DeviceManager: ObservableObject {
             
             
             var dataPtr: UnsafeMutablePointer<UInt8>? = nil
-            var length: Int = 0
+            var length: UInt = 0
             
-            let err = afc_file_read(file, &dataPtr, &length)
+            let err = afc_file_read(file, &dataPtr, &length, nil)
             
             if err == nil, let dataPtr = dataPtr, length > 0 {
-                let data = Data(bytes: dataPtr, count: length)
+                let data = Data(bytes: dataPtr, count: Int(length))
                 Logger.shared.log("[DeviceManager] Downloaded \(length) bytes from \(remotePath)")
                 afc_file_read_data_free(dataPtr, length)
                 afc_file_close(file)
@@ -507,9 +507,9 @@ class DeviceManager: ObservableObject {
             
             if let data = try? Data(contentsOf: localURL) {
                 
-                data.withUnsafeBytes { buffer in
+                data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
                     if let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                        afc_file_write(file, base, data.count)
+                        afc_file_write(file, base, UInt(data.count), nil)
                     }
                 }
                 
