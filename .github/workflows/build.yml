@@ -49,55 +49,13 @@ jobs:
           fi
           cp "$LIB" MusicManager/libidevice_ffi.a
           cp "$HDR" MusicManager/idevice.h
-          ls -la MusicManager/
 
       - name: Create Bridging Header
         run: |
           cat > MusicManager/Bridging-Header.h << 'EOF'
           #import "idevice.h"
           EOF
-
-      - name: Precise patching for AFC type issues
-        run: |
-          set -e
-          file="MusicManager/iDeviceManager.swift"
-          if [ ! -f "$file" ]; then
-            echo "Error: $file not found!"
-            exit 1
-          fi
-
-          echo "=== BEFORE PATCHING ==="
-          grep -n "afc_file_read" "$file" || echo "No afc_file_read found"
-
-          # 1. Fix ambiguous withUnsafeBytes (explicitly add type to closure)
-          # Fixes: "generic parameter 'ContentType' could not be inferred"
-          sed -i '' 's/data.withUnsafeBytes { buffer in/data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in/g' "$file"
-
-          # 2. Change var length declaration to UInt32 (safe base type for var)
-          sed -i '' 's/var length: *Int/var length: UInt32/' "$file"
-
-          # 3. For afc_file_write: Add missing nil param & Use UInt (bukan UInt32)
-          # Matches line 248 and 361 in your file
-          sed -i '' 's/afc_file_write(file, base, data.count)/afc_file_write(file, base, UInt(data.count), nil)/' "$file"
-
-          # 4. For afc_file_read: Add missing nil param, handle '&', & Use UInt (bukan UInt32)
-          # Matches line 449 in your file
-          # CRITICAL: Menggunakan escape sequence (\&) agar sed tidak menduplikasi match
-          sed -i '' 's/afc_file_read(file, &dataPtr, &length)/afc_file_read(file, \&dataPtr, UInt(length), nil)/' "$file"
-          
-          # Fallback pattern (just in case)
-          sed -i '' 's/afc_file_read(file, &dataPtr, length)/afc_file_read(file, \&dataPtr, UInt(length), nil)/' "$file"
-
-          # 5. Clean up any broken pointer casts
-          sed -i '' 's/UnsafeMutablePointer<UInt32>(, /UnsafeMutablePointer<UInt32>(/' "$file"
-          sed -i '' 's/&length length/UnsafeMutablePointer<UInt32>(&length)/' "$file" || true
-
-          echo "=== AFTER PATCHING ==="
-          grep -n "afc_file_read" "$file" || echo "No afc_file_read after patch"
-          
-          echo "=== DIFF SUMMARY ==="
-          git diff "$file" | head -n 40 || echo "No diff or git not tracking"
-
+      
       - name: Build the app
         run: |
           set -o pipefail
