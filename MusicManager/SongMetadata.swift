@@ -227,7 +227,7 @@ struct SongMetadata: Identifiable {
                 // Lyrics Extraction
                 if lyrics == nil {
                     if combined.contains("USLT") || combined.contains("LYRICS") || combined.contains("UNSYNC") || keyString == "\u{00A9}lyr" {
-                         lyrics = SongMetadata.cleanLyrics(val)
+                         lyrics = SongMetadata.cleanLyrics(val, title: title, artist: artist)
                          print("[SongMetadata] Extracted and cleaned lyrics from key: \(combined)")
                     }
                 }
@@ -362,21 +362,91 @@ struct SongMetadata: Identifiable {
         return nil
     }
     
-    static private func cleanLyrics(_ rawLyrics: String) -> String {
+    static private func cleanLyrics(_ rawLyrics: String, title: String? = nil, artist: String? = nil) -> String {
         // 1. Remove metadata headers like [ti:Title], [ar:Artist], etc.
-        // regex: \[([a-z]+):.*\]
-        let withoutHeaders = rawLyrics.replacingOccurrences(of: #"\[([a-z]+):.*\]"#, with: "", options: .regularExpression)
+        var cleaned = rawLyrics.replacingOccurrences(of: #"\[([a-z]+):.*\]"#, with: "", options: [.regularExpression, .caseInsensitive])
         
         // 2. Remove timestamps like [00:21.26] or [00:21]
-        // regex: \[\d{2,}:\d{2}(\.\d{2,})?\]
-        let withoutTimestamps = withoutHeaders.replacingOccurrences(of: #"\[\d{2,}:\d{2}(\.\d{2,})?\]"#, with: "", options: .regularExpression)
+        cleaned = cleaned.replacingOccurrences(of: #"\[\d{2,}:\d{2}(\.\d{2,})?\]"#, with: "", options: .regularExpression)
         
-        // 3. Clean up extra whitespace/newlines
-        let lines = withoutTimestamps.components(separatedBy: .newlines)
-        let cleanLines = lines.map { $0.trimmingCharacters(in: .whitespaces) }
-                              .filter { !$0.isEmpty }
+        // 3. Genius-specific artifact removal (Generic)
+        cleaned = cleaned.replacingOccurrences(of: #"\d+\s+Contributors"#, with: "", options: .regularExpression)
         
-        return cleanLines.joined(separator: "\n")
+        // 4. Remove all content inside square brackets [...] completely
+        cleaned = cleaned.replacingOccurrences(of: #"\[[^\]]+\]"#, with: "", options: .regularExpression)
+
+        // 5. Clean up extra whitespace/newlines While identifying and removing headers
+        let lines = cleaned.components(separatedBy: .newlines)
+        var resultLines: [String] = []
+        
+        // Define common noise words for headers
+        let noiseWords = ["lyrics", "letra", "contributors", "official", "video", "audio"]
+        
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                if let last = resultLines.last, !last.isEmpty {
+                    resultLines.append("")
+                }
+                continue
+            }
+            
+            // Smart Header Check: If line contains the title and only noise words/whitespace
+            if let title = title {
+                let lowLine = trimmed.lowercased()
+                let lowTitle = title.lowercased()
+                
+                if lowLine == lowTitle {
+                    continue // Exact title match header
+                }
+                
+                if lowLine.contains(lowTitle) {
+                    // Check if the rest of the line is just noise
+                    var remainder = lowLine.replacingOccurrences(of: lowTitle, with: "")
+                    for noise in noiseWords {
+                        remainder = remainder.replacingOccurrences(of: noise, with: "")
+                    }
+                    let cleanRemainder = remainder.trimmingCharacters(in: .punctuationCharacters).trimmingCharacters(in: .whitespaces)
+                    if cleanRemainder.isEmpty {
+                        continue // It's a header like "Title Lyrics"
+                    }
+                }
+            }
+            
+            resultLines.append(trimmed)
+        }
+        
+        return resultLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func fetchLyricsFromLRCLIB(title: String, artist: String, album: String, durationMs: Int) async -> String? {
+        let titleEnc = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let artistEnc = artist.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let albumEnc = album.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let durationSec = durationMs / 1000
+        
+        let urlString = "https://lrclib.net/api/get?artist_name=\(artistEnc)&track_name=\(titleEnc)&album_name=\(albumEnc)&duration=\(durationSec)"
+        guard let url = URL(string: urlString) else { return nil }
+        
+        var request = URLRequest(url: url)
+        request.setValue("MusicManager/1.0.1 (https://github.com/EduAlexxis/MusicManager)", forHTTPHeaderField: "User-Agent")
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            // Prefer plainLyrics for better cleaning, or use syncedLyrics if plain is missing
+            let lyrics = (json?["plainLyrics"] as? String) ?? (json?["syncedLyrics"] as? String)
+            
+            if let l = lyrics, !l.isEmpty {
+                print("[SongMetadata] Successfully fetched lyrics from LRCLIB")
+                return SongMetadata.cleanLyrics(l, title: title, artist: artist)
+            }
+        } catch {
+            print("[SongMetadata] LRCLIB fetch failed: \(error)")
+        }
+        return nil
     }
 }
 

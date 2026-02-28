@@ -14,6 +14,7 @@ struct ContentView: View {
     
     // Detect "iOS 26" (GlassUI)
     // Since we can't use #available(iOS 26, *), we check ProcessInfo major version
+    // MARK: - iOS 26+ Version Check (GlassUI Support)
     private var isIOS26OrLater: Bool {
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return version.majorVersion >= 26
@@ -62,6 +63,14 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowLogViewer"))) { _ in
             showingLogViewer = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("AddSongToQueue"))) { notification in
+            if let song = notification.object as? SongMetadata {
+                withAnimation {
+                    songs.append(song)
+                    selectedTab = 0
+                }
+            }
         }
         .onAppear {
             
@@ -281,7 +290,6 @@ struct FloatingTabBar: View {
                 selectedTab = 1
             }
             
-            
             TabBarButton(
                 icon: "gearshape.fill",
                 title: "Settings",
@@ -318,7 +326,7 @@ struct TabBarButton: View {
                     .font(.caption2)
             }
             .foregroundColor(isSelected ? .blue : .gray)
-            .frame(width: 70, height: 50)
+            .frame(width: 80, height: 50)
             .background(
                 isSelected ?
                     Capsule().fill(Color.blue.opacity(0.1)) :

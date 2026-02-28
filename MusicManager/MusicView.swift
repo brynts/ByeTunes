@@ -225,13 +225,8 @@ struct MusicView: View {
                                 ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
                                     VStack(spacing: 0) {
                                         
-                                        let source = UserDefaults.standard.string(forKey: "metadataSource")
-                                        let isAPISource = source == "itunes" || source == "deezer"
-                                        let isCustomSource = source == "custom"
-                                        let isLocalSource = source == "local" || source == nil // Default is local
-                                         
-                                        // Allow editing for API (search), Custom (manual), and Local (manual)
-                                        let canEdit = true // All modes now support some form of editing/matching
+                                        // All modes support editing/matching
+                        let canEdit = true
 
                                         
                                         SongRowView(
@@ -485,7 +480,23 @@ struct MusicView: View {
                      if var song = try? await SongMetadata.fromURL(destURL) {
                          if useiTunes && autofetch {
                              song = await SongMetadata.enrichWithiTunesMetadata(song)
+                         } else if metadataSource == "deezer" && autofetch {
+                             song = await SongMetadata.enrichWithDeezerMetadata(song)
                          }
+                         
+                         // Fetch lyrics from LRCLIB if enabled and not already present
+                         let fetchLyrics = UserDefaults.standard.bool(forKey: "fetchLyrics")
+                         if fetchLyrics && (song.lyrics == nil || song.lyrics?.isEmpty == true) {
+                             if let fetchedLyrics = await SongMetadata.fetchLyricsFromLRCLIB(
+                                 title: song.title,
+                                 artist: song.artist,
+                                 album: song.album,
+                                 durationMs: song.durationMs
+                             ) {
+                                 song.lyrics = fetchedLyrics
+                             }
+                         }
+                         
                          importedSongs.append(song)
                      }
                  }

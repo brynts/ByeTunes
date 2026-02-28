@@ -11,6 +11,7 @@ struct ManualMetadataEditor: View {
     @State private var genre: String = ""
     @State private var year: String = ""
     @State private var trackNumber: String = ""
+    @State private var lyrics: String = ""
     
     @State private var artworkItem: PhotosPickerItem?
     @State private var artworkData: Data?
@@ -123,6 +124,22 @@ struct ManualMetadataEditor: View {
                 } header: {
                     Text("Details")
                 }
+                
+                Section {
+                    TextEditor(text: $lyrics)
+                        .frame(minHeight: 200)
+                        .font(.system(.body, design: .monospaced))
+                } header: {
+                    HStack {
+                        Text("Lyrics")
+                        Spacer()
+                        if !lyrics.isEmpty {
+                            Text("\(lyrics.components(separatedBy: .newlines).count) lines")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
             }
             .navigationTitle("Edit Metadata")
             .navigationBarTitleDisplayMode(.inline)
@@ -154,6 +171,7 @@ struct ManualMetadataEditor: View {
                 if let track = song.trackNumber {
                     trackNumber = String(track)
                 }
+                lyrics = song.lyrics ?? ""
                 artworkData = song.artworkData
             }
             .onChange(of: artworkItem, perform: { newItem in
@@ -184,6 +202,7 @@ struct ManualMetadataEditor: View {
         } else {
             updatedSong.trackNumber = nil
         }
+        updatedSong.lyrics = lyrics.isEmpty ? nil : lyrics
         updatedSong.artworkData = artworkData
         
         song = updatedSong

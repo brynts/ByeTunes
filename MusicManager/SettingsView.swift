@@ -8,6 +8,11 @@ struct SettingsView: View {
     @State private var showingPairingPicker = false
     @State private var showingDeleteAlert = false
     
+    // Debug
+    @State private var showingLogViewer = false
+    @State private var exportedDbURLs: [URL] = []
+    @State private var showingDbExportSheet = false
+    @State private var isExportingDb = false
     
     @State private var showToast = false
     @State private var toastTitle = ""
@@ -15,6 +20,7 @@ struct SettingsView: View {
     
     @AppStorage("metadataSource") private var metadataSource = "local"
     @AppStorage("autofetchMetadata") private var autofetchMetadata = true
+    @AppStorage("fetchLyrics") private var fetchLyrics = false
     @AppStorage("storeRegion") private var storeRegion = "US"
     
     var body: some View {
@@ -245,7 +251,52 @@ struct SettingsView: View {
                             .padding(.vertical, 10)
                             .padding(.horizontal, 16)
                             
-                            if metadataSource == "itunes" {
+                            Divider().padding(.leading, 56)
+                            
+                            Toggle(isOn: $fetchLyrics) {
+                                HStack {
+                                    Image(systemName: "quote.bubble.fill")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                        .frame(width: 28)
+                                    
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Fetch Lyrics")
+                                            .font(.body)
+                                        Text("Automatically fetch lyrics from LRCLIB")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                            .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 16)
+                        } else {
+                            // Also show lyrics toggle even if metadata source is local
+                            Divider().padding(.leading, 56)
+                            
+                            Toggle(isOn: $fetchLyrics) {
+                                HStack {
+                                    Image(systemName: "quote.bubble.fill")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                        .frame(width: 28)
+                                    
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Fetch Lyrics")
+                                            .font(.body)
+                                        Text("Automatically fetch lyrics from LRCLIB")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 16)
+                        }
+                        
+                        if metadataSource == "itunes" {
                                 Divider().padding(.leading, 56)
                                 
                                 HStack {
@@ -275,7 +326,6 @@ struct SettingsView: View {
                                 .padding(.vertical, 10)
                                 .padding(.horizontal, 16)
                             }
-                        }
                     }
                     .background(Color(.systemBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -549,6 +599,81 @@ struct SettingsView: View {
                     }
                 }
                 
+                
+                // ── DEBUG ──────────────────────────────────────────────────
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("DEBUG")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .tracking(0.5)
+                    
+                    VStack(spacing: 0) {
+                        
+                        // Console
+                        Button {
+                            showingLogViewer = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "terminal.fill")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                    .frame(width: 28)
+                                
+                                Text("Console")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                
+                                Spacer()
+                                
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundColor(Color(.systemGray3))
+                            }
+                            .padding(.vertical, 14)
+                            .padding(.horizontal, 16)
+                        }
+                        
+                        Divider().padding(.leading, 56)
+                        
+                        // Export Database
+                        Button {
+                            exportDatabase()
+                        } label: {
+                            HStack {
+                                if isExportingDb {
+                                    ProgressView()
+                                        .frame(width: 28)
+                                } else {
+                                    Image(systemName: "cylinder.split.1x2")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                        .frame(width: 28)
+                                }
+                                
+                                Text(isExportingDb ? "Exporting…" : "Export Database")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                
+                                Spacer()
+                                
+                                Image(systemName: "square.and.arrow.up")
+                                    .font(.caption)
+                                    .foregroundColor(Color(.systemGray3))
+                            }
+                            .padding(.vertical, 14)
+                            .padding(.horizontal, 16)
+                        }
+                        .disabled(isExportingDb || !manager.heartbeatReady)
+                    }
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color(.systemGray5), lineWidth: 1)
+                    )
+                }
+                
 
             }
             .padding(.horizontal, 20)
@@ -559,18 +684,21 @@ struct SettingsView: View {
                 handlePairingImport(url: url)
             }
         }
+        .sheet(isPresented: $showingLogViewer) {
+            LogViewer()
+        }
+        .sheet(isPresented: $showingDbExportSheet) {
+            LogShareSheet(activityItems: exportedDbURLs)
+        }
         .alert("Delete Library?", isPresented: $showingDeleteAlert) {
             Button("Cancel", role: .cancel) { }
             Button("Delete", role: .destructive) {
-                
                 manager.deleteMediaLibrary { success in
                     DispatchQueue.main.async {
-                        
-                        
                         if success {
-                           self.showToast(title: "Library Deleted", icon: "trash.circle.fill")
+                            self.showToastMessage(title: "Library Deleted", icon: "trash.circle.fill")
                         } else {
-                           self.showToast(title: "Deletion Failed", icon: "exclamationmark.triangle.fill")
+                            self.showToastMessage(title: "Deletion Failed", icon: "exclamationmark.triangle.fill")
                         }
                     }
                 }
@@ -578,9 +706,7 @@ struct SettingsView: View {
         } message: {
             Text("This will permanently delete your Music library database and playlists from the device. This action cannot be undone.")
         }
-    }
-    
-        
+            
         if showToast {
             HStack(spacing: 12) {
                 Image(systemName: toastIcon)
@@ -603,11 +729,51 @@ struct SettingsView: View {
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(100)
         }
+        } // ZStack
+    } // body
+
+    private func exportDatabase() {
+        isExportingDb = true
+
+        let tmp = FileManager.default.temporaryDirectory
+        let files: [(remote: String, local: URL)] = [
+            ("/iTunes_Control/iTunes/MediaLibrary.sqlitedb",
+             tmp.appendingPathComponent("MediaLibrary.sqlitedb")),
+            ("/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm",
+             tmp.appendingPathComponent("MediaLibrary.sqlitedb-shm")),
+            ("/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal",
+             tmp.appendingPathComponent("MediaLibrary.sqlitedb-wal"))
+        ]
+
+        var downloaded: [URL] = []
+
+        func downloadNext(_ index: Int) {
+            guard index < files.count else {
+                DispatchQueue.main.async {
+                    self.isExportingDb = false
+                    if downloaded.isEmpty {
+                        self.showToastMessage(title: "Export Failed", icon: "xmark.circle.fill")
+                    } else {
+                        self.exportedDbURLs = downloaded
+                        self.showingDbExportSheet = true
+                    }
+                }
+                return
+            }
+
+            let file = files[index]
+            manager.downloadFileFromDevice(remotePath: file.remote, localURL: file.local) { success in
+                if success {
+                    downloaded.append(file.local)
+                }
+                downloadNext(index + 1)
+            }
+        }
+
+        downloadNext(0)
     }
-
     
-
-    private func showToast(title: String, icon: String) {
+    private func showToastMessage(title: String, icon: String) {
         withAnimation(.spring()) {
             self.toastTitle = title
             self.toastIcon = icon
@@ -644,10 +810,9 @@ struct SettingsView: View {
             
             status = "Pairing file imported"
             
-            
             manager.startHeartbeat()
         } catch {
             status = "Import failed"
         }
     }
-}
+} // <--- DO NOT DELETE THIS BRACE. It closes the SettingsView struct.

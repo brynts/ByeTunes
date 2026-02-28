@@ -194,6 +194,55 @@ class DeviceManager: ObservableObject {
     
     
     
+    func getDeviceProductVersion() -> String? {
+        var lockdownd: LockdowndClientHandle?
+        let err = lockdownd_connect(provider, &lockdownd)
+        
+        guard err == IdeviceSuccess, let client = lockdownd else {
+            return nil
+        }
+        defer { lockdownd_client_free(client) }
+        
+        var plist: plist_t?
+        // ProductVersion is the key for iOS version (e.g., "17.2.1")
+        let valErr = lockdownd_get_value(client, "ProductVersion", nil, &plist)
+        
+        guard valErr == IdeviceSuccess, let versionPlist = plist else {
+            return nil
+        }
+        defer { plist_free(versionPlist) }
+        
+        var cString: UnsafeMutablePointer<CChar>?
+        plist_get_string_val(versionPlist, &cString)
+        
+        if let cString = cString {
+            let version = String(cString: cString)
+            plist_mem_free(cString)
+            return version
+        }
+        
+        return nil
+    }
+    
+    func getDatabaseVersion() -> DatabaseVersion {
+        guard let versionString = getDeviceProductVersion() else {
+            Logger.shared.log("[DeviceManager] Could not detect version, defaulting to iOS 16/26 schema")
+            return .ios(16)
+        }
+        
+        Logger.shared.log("[DeviceManager] Detected device version: \(versionString)")
+        let components = versionString.split(separator: ".").compactMap { Int($0) }
+        guard let major = components.first else { return .ios(16) }
+        
+        // Check for subscription status (this is a heuristic, might need refinement)
+        // For now, let's look for a specific folder or property if we can, 
+        // but given the user's specific request for "ios 26 music subscription on", 
+        // we'll assume it's a version 26 specific variant for now.
+        // If the user wants to toggle this, we might need a UI setting.
+        
+        return .ios(major)
+    }
+
     func triggerATCSync(completion: @escaping (Bool) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             var lockdownd: LockdowndClientHandle?
@@ -711,12 +760,14 @@ class DeviceManager: ObservableObject {
                     progress("Merging with existing library...")
                     Logger.shared.log("[DeviceManager] Step 3: Merging with existing database (\(existingData.count) bytes)")
                     
+                    let version = self.getDatabaseVersion()
                     let result = try MediaLibraryBuilder.addSongsToExistingDatabase(
                         existingDbData: existingData,
                         walData: walData,
                         shmData: shmData,
                         newSongs: validSongs,
-                        existingOnDeviceFiles: onDeviceFiles
+                        existingOnDeviceFiles: onDeviceFiles,
+                        version: version
                     )
                     dbURL = result.dbURL
                     existingFiles = result.existingFiles
@@ -730,7 +781,8 @@ class DeviceManager: ObservableObject {
                     
                     progress("Creating new library...")
                     Logger.shared.log("[DeviceManager] Step 3: Creating fresh database")
-                    let createResult = try MediaLibraryBuilder.createDatabase_v104(songs: validSongs)
+                    let version = self.getDatabaseVersion()
+                    let createResult = try MediaLibraryBuilder.createDatabase(songs: validSongs, version: version)
                     dbURL = createResult.dbURL
                     artworkInfo = createResult.artworkInfo
                 }
@@ -1010,6 +1062,7 @@ class DeviceManager: ObservableObject {
                     progress("Merging with existing library...")
                     Logger.shared.log("[DeviceManager] Step 3: Merging with existing database (\(existingData.count) bytes)")
                     
+                    let version = self.getDatabaseVersion()
                     let result = try MediaLibraryBuilder.addSongsToExistingDatabase(
                         existingDbData: existingData,
                         walData: walData,
@@ -1017,7 +1070,8 @@ class DeviceManager: ObservableObject {
                         newSongs: validSongs, 
                         playlistName: playlistName,
                         targetPlaylistPid: targetPlaylistPid,
-                        existingOnDeviceFiles: onDeviceFiles
+                        existingOnDeviceFiles: onDeviceFiles,
+                        version: version
                     )
                     dbURL = result.dbURL
                     existingFiles = result.existingFiles
@@ -1026,7 +1080,8 @@ class DeviceManager: ObservableObject {
                 } else {
                     progress("Creating new library with playlist...")
                     Logger.shared.log("[DeviceManager] Step 3: Creating fresh database with playlist")
-                    let createResult = try MediaLibraryBuilder.createDatabase_v104(songs: validSongs, playlistName: playlistName)
+                    let version = self.getDatabaseVersion()
+                    let createResult = try MediaLibraryBuilder.createDatabase(songs: validSongs, version: version, playlistName: playlistName)
                     dbURL = createResult.dbURL
                     artworkInfo = createResult.artworkInfo
 
@@ -1232,152 +1287,94 @@ class DeviceManager: ObservableObject {
             guard let self = self else { return }
             
             
+            // ── Step 1: Load existing Ringtones.plist (merge, don't overwrite) ──
             progress("Preparing ringtones...")
-            Logger.shared.log("[DeviceManager] Step 1: Downloading Ringtones.plist")
-            
+            Logger.shared.log("[DeviceManager] Downloading existing Ringtones.plist")
+
             var rootDict: [String: Any] = [:]
             var ringtonesDict: [String: Any] = [:]
-            
+
             let plistSem = DispatchSemaphore(value: 0)
             self.downloadFileFromDevice(remotePath: "/iTunes_Control/Ringtones/Ringtones.plist") { data in
                 if let data = data {
-                    do {
-                        if let dict = try PropertyListSerialization.propertyList(from: data, options: .mutableContainersAndLeaves, format: nil) as? [String: Any] {
-                            rootDict = dict
-                            if let r = dict["Ringtones"] as? [String: Any] {
-                                ringtonesDict = r
-                            }
-                        }
-                    } catch {
-                        Logger.shared.log("[DeviceManager] Failed to parse existing Ringtones.plist: \(error)")
+                    if let dict = try? PropertyListSerialization.propertyList(from: data, options: .mutableContainersAndLeaves, format: nil) as? [String: Any] {
+                        rootDict = dict
+                        ringtonesDict = (dict["Ringtones"] as? [String: Any]) ?? [:]
+                        Logger.shared.log("[DeviceManager] Loaded existing plist with \(ringtonesDict.count) entries")
                     }
                 }
                 plistSem.signal()
             }
             plistSem.wait()
-            
-            
-            progress("Preparing database...")
-            let dbSem = DispatchSemaphore(value: 0)
-            var existingDbData: Data?
-            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { data in
-                existingDbData = data
-                dbSem.signal()
-            }
-            dbSem.wait()
-            
-            var dbData: Data
-            if let existing = existingDbData {
-                dbData = existing
-            } else {
-                Logger.shared.log("[DeviceManager] No existing DB found. Creating fresh database for Ringtones...")
 
-                Logger.shared.log("[DeviceManager] WARNING: No DB found. Ringtone injection might fail if no library exists.")
-                dbData = Data()
+            // ── Step 2: Ensure /iTunes_Control/Ringtones exists ──────────────
+            var afcDir: AfcClientHandle?
+            afc_client_connect(self.provider, &afcDir)
+            if afcDir != nil {
+                afc_make_directory(afcDir, "/iTunes_Control/Ringtones")
+                afc_client_free(afcDir)
             }
-            
-            
-            let tempDir = FileManager.default.temporaryDirectory
-            let dbPath = tempDir.appendingPathComponent("MediaLibrary.sqlitedb")
-            try? FileManager.default.removeItem(at: dbPath)
-            do {
-                try dbData.write(to: dbPath)
-            } catch {
-                Logger.shared.log("[DeviceManager] Failed to write temp DB: \(error)")
-                DispatchQueue.main.async { completion(false) }
-                return
-            }
-            
-            
-            var db: OpaquePointer?
-            if sqlite3_open(dbPath.path, &db) != SQLITE_OK {
-                Logger.shared.log("[DeviceManager] Failed to open temp DB")
-                DispatchQueue.main.async { completion(false) }
-                return
-            }
-            
-            
-            var insertedPids: [Int64] = []
-            do {
-                 insertedPids = try MediaLibraryBuilder.insertRingtones(db: db, ringtones: ringtones)
-            } catch {
-                Logger.shared.log("[DeviceManager] DB update error: \(error)")
-                sqlite3_close(db)
-                DispatchQueue.main.async { completion(false) }
-                return
-            }
-            
-            sqlite3_close(db)
-            
-            
-            let uploadDbSem = DispatchSemaphore(value: 0)
-            var dbSuccess = false
-            self.uploadFileToDevice(localURL: dbPath, remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { success in
-                dbSuccess = success
-                uploadDbSem.signal()
-            }
-            uploadDbSem.wait()
-            
-            if !dbSuccess {
-                Logger.shared.log("[DeviceManager] Failed to upload modified DB")
-                DispatchQueue.main.async { completion(false) }
-                return
-            }
-            
-            
+
+            // ── Step 3: Upload each .m4r and build the plist entries ─────────
+            // Confirmed by reversing a real device DB exported via 3uTools:
+            // MediaLibrary.sqlitedb has ZERO ringtone rows (media_type 16384).
+            // iOS reads ringtones exclusively from Ringtones.plist + the file.
+            // GUID must be a 16-char uppercase hex string (e.g. "E3773EA9BBA24B35").
             progress("Uploading ringtones...")
-            
-            for (index, ringtone) in ringtones.enumerated() {
-                let pid = insertedPids[index]
+
+            for ringtone in ringtones {
                 let remotePath = "/iTunes_Control/Ringtones/\(ringtone.remoteFilename)"
-                
-                
+
                 let uploadSem = DispatchSemaphore(value: 0)
-                var success = false
+                var uploadOK = false
                 self.uploadFileToDevice(localURL: ringtone.localURL, remotePath: remotePath) { s in
-                    success = s
+                    uploadOK = s
                     uploadSem.signal()
                 }
                 uploadSem.wait()
-                
-                if !success {
-                    Logger.shared.log("[DeviceManager] Failed to upload ringtone: \(ringtone.title)")
+
+                if uploadOK {
+                    Logger.shared.log("[DeviceManager] Uploaded: \(ringtone.remoteFilename)")
+                } else {
+                    Logger.shared.log("[DeviceManager] WARNING: Failed to upload \(ringtone.remoteFilename)")
                 }
-                
-                
+
+                // PID and GUID match the format Apple/3uTools uses
+                let pid  = SongMetadata.generatePersistentId()
+                let guid = String(format: "%016llX", SongMetadata.generatePersistentId())
+
                 let entry: [String: Any] = [
-                    "Name": ringtone.title,
-                    "Total Time": ringtone.durationMs, 
-                    "PID": pid,
+                    "Name":              ringtone.title,
+                    "Total Time":        ringtone.durationMs,   // real duration ms
+                    "PID":               pid,
                     "Protected Content": false,
-                    "GUID": SongMetadata.generatePersistentId() 
+                    "GUID":              guid
                 ]
                 ringtonesDict[ringtone.remoteFilename] = entry
-                Logger.shared.log("[DeviceManager] Ringtone plist entry: \(ringtone.remoteFilename) -> PID \(pid)")
+                Logger.shared.log("[DeviceManager] Plist entry: \(ringtone.remoteFilename) PID=\(pid) GUID=\(guid)")
             }
-            
+
+            // ── Step 4: Upload merged Ringtones.plist (binary format) ────────
             rootDict["Ringtones"] = ringtonesDict
-            
-            
+
             do {
-                let plistData = try PropertyListSerialization.data(fromPropertyList: rootDict, format: .xml, options: 0)
+                let tempDir  = FileManager.default.temporaryDirectory
+                let plistData = try PropertyListSerialization.data(fromPropertyList: rootDict, format: .binary, options: 0)
                 let tempPlist = tempDir.appendingPathComponent("Ringtones.plist")
                 try plistData.write(to: tempPlist)
-                
-                let plistUploadSem = DispatchSemaphore(value: 0)
+
+                let plistSem2 = DispatchSemaphore(value: 0)
                 self.uploadFileToDevice(localURL: tempPlist, remotePath: "/iTunes_Control/Ringtones/Ringtones.plist") { _ in
-                    plistUploadSem.signal()
+                    plistSem2.signal()
                 }
-                plistUploadSem.wait()
-                
+                plistSem2.wait()
+                Logger.shared.log("[DeviceManager] Ringtones.plist uploaded (\(ringtonesDict.count) total entries)")
             } catch {
-                Logger.shared.log("[DeviceManager] Failed to generate/upload Ringtones.plist: \(error)")
+                Logger.shared.log("[DeviceManager] Failed to upload Ringtones.plist: \(error)")
             }
-            
-            
+
             progress("Done!")
             self.sendSyncFinishedNotification()
-            
             DispatchQueue.main.async { completion(true) }
         }
     }
