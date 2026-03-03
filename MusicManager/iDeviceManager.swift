@@ -481,7 +481,6 @@ class DeviceManager: ObservableObject {
                 return
             }
             
-            
             afc_file_open(afc, remotePath, AfcRdOnly, &file)
             
             guard file != nil else {
@@ -491,23 +490,35 @@ class DeviceManager: ObservableObject {
                 return
             }
             
+            var fullData = Data()
+            let chunkSize: UInt = 64 * 1024
             
-            var dataPtr: UnsafeMutablePointer<UInt8>? = nil
-            var length: Int = 0
+            while true {
+                var dataPtr: UnsafeMutablePointer<UInt8>? = nil
+                var bytesRead: UInt = 0
+                
+                let err = afc_file_read(file, &dataPtr, chunkSize, &bytesRead)
+                
+                if err != nil || bytesRead == 0 {
+                    break
+                }
+                
+                if let dataPtr = dataPtr {
+                    fullData.append(dataPtr, count: Int(bytesRead))
+                    afc_file_read_data_free(dataPtr, Int(bytesRead))
+                } else {
+                    break
+                }
+            }
             
-            let err = afc_file_read(file, &dataPtr, &length)
+            afc_file_close(file)
+            afc_client_free(afc)
             
-            if err == nil, let dataPtr = dataPtr, length > 0 {
-                let data = Data(bytes: dataPtr, count: length)
-                Logger.shared.log("[DeviceManager] Downloaded \(length) bytes from \(remotePath)")
-                afc_file_read_data_free(dataPtr, length)
-                afc_file_close(file)
-                afc_client_free(afc)
-                completion(data)
+            if fullData.count > 0 {
+                Logger.shared.log("[DeviceManager] Downloaded \(fullData.count) bytes from \(remotePath)")
+                completion(fullData)
             } else {
                 Logger.shared.log("[DeviceManager] Failed to read file: \(remotePath)")
-                afc_file_close(file)
-                afc_client_free(afc)
                 completion(nil)
             }
         }
