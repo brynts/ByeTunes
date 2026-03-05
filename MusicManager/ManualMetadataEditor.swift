@@ -20,6 +20,8 @@ struct ManualMetadataEditor: View {
     @State private var showingSearchSheet = false
     @State private var showingLyricsSearchSheet = false
     
+    @AppStorage("metadataSource") private var metadataSource = "local"
+    
     @FocusState private var focusedField: Field?
     
     enum Field {
@@ -73,14 +75,20 @@ struct ManualMetadataEditor: View {
                                 .foregroundColor(.accentColor)
                             Text("Search Metadata")
                                 .foregroundColor(.accentColor)
+                            
                             Spacer()
+                            
+                            Text(metadataSource == "local" ? "iTunes" : (metadataSource == "apple" ? "Apple Music" : metadataSource.capitalized))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
                             Image(systemName: "chevron.right")
                                 .font(.caption)
                                 .foregroundColor(Color(uiColor: .tertiaryLabel))
                         }
                     }
                 } footer: {
-                    Text("Search iTunes or Deezer to auto-fill metadata fields")
+                    Text("Search \(metadataSource == "local" ? "iTunes" : (metadataSource == "apple" ? "Apple Music" : metadataSource.capitalized)) to auto-fill metadata fields")
                 }
                 
                 Section {
@@ -225,12 +233,7 @@ struct ManualMetadataEditor: View {
                 iTunesSearchSheet(song: $song, isPresented: $showingSearchSheet)
             }
             .sheet(isPresented: $showingLyricsSearchSheet) {
-                LyricsSearchSheet(
-                    lyrics: $lyrics,
-                    isPresented: $showingLyricsSearchSheet,
-                    initialTitle: title,
-                    initialArtist: artist
-                )
+                LyricsSearchSheet(lyrics: $lyrics, isPresented: $showingLyricsSearchSheet, songTitle: title, songArtist: artist)
             }
         }
     }
@@ -255,8 +258,11 @@ struct ManualMetadataEditor: View {
         updatedSong.artist = artist
         updatedSong.album = album
         updatedSong.genre = genre
-        if let y = Int(year) {
-             updatedSong.year = y
+        let trimmedYear = year.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedYear.isEmpty {
+            updatedSong.year = 0
+        } else if let y = Int(trimmedYear) {
+            updatedSong.year = y
         }
         if let t = Int(trackNumber) {
             updatedSong.trackNumber = t

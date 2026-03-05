@@ -35,6 +35,9 @@ struct SongMetadata: Identifiable {
     var xid: String?
     var releaseDate: Int = 0
     
+    // UI Badging
+    var richAppleMetadataFetched: Bool = false
+    
     
     var artworkToken: String {
         return "local://\(remoteFilename)"
@@ -530,7 +533,7 @@ struct SongMetadata: Identifiable {
         guard let url = URL(string: urlString) else { return nil }
         
         var request = URLRequest(url: url)
-        request.setValue("MusicManager/1.0.1 (https://github.com/EduAlexxis/MusicManager)", forHTTPHeaderField: "User-Agent")
+        request.setValue("MusicManager/1.0.3 (https://github.com/EduAlexxis/MusicManager)", forHTTPHeaderField: "User-Agent")
         
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -567,7 +570,7 @@ extension SongMetadata {
         guard let url = URL(string: "https://lrclib.net/api/search?q=\(encodedQuery)") else { return [] }
         
         var request = URLRequest(url: url)
-        request.setValue("MusicManager/1.0.1 (https://github.com/EduAlexxis/MusicManager)", forHTTPHeaderField: "User-Agent")
+        request.setValue("MusicManager/1.0.3 (https://github.com/EduAlexxis/MusicManager)", forHTTPHeaderField: "User-Agent")
         
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -578,6 +581,113 @@ extension SongMetadata {
             print("[SongMetadata] LRCLIB search failed: \(error)")
             return []
         }
+    }
+
+    static func applyAppleMusicMatch(_ match: AppleMusicAPI.AppleMusicSong, to song: SongMetadata) async -> SongMetadata {
+        var enrichedSong = song
+        let amsMatch = match
+        
+        enrichedSong.title = amsMatch.attributes.name
+        enrichedSong.artist = amsMatch.attributes.artistName
+        if let alb = amsMatch.attributes.albumName { enrichedSong.album = alb }
+        
+        // 1. Store ID (Track ID)
+        if let songIdInt = Int64(amsMatch.id) {
+            enrichedSong.storeId = songIdInt
+        }
+        
+        // 2. Year & Release Date
+        if let dateStr = amsMatch.attributes.releaseDate {
+            if let yearInt = Int(dateStr.prefix(4)) {
+                enrichedSong.year = yearInt
+            }
+            if let epoch = parseDateToEpoch(dateStr) {
+                enrichedSong.releaseDate = epoch
+            }
+        } else if let firstAlbum = amsMatch.relationships?.albums?.data.first,
+                  let albDateStr = firstAlbum.attributes.releaseDate {
+            if let yearInt = Int(albDateStr.prefix(4)) {
+                enrichedSong.year = yearInt
+            }
+            if let epoch = parseDateToEpoch(albDateStr) {
+                enrichedSong.releaseDate = epoch
+            }
+        }
+        
+        // 3. XID (ISRC)
+        if let isrc = amsMatch.attributes.isrc, !isrc.isEmpty {
+            enrichedSong.xid = isrc
+        }
+        
+        // 4. Explicit Flag
+        if let rating = amsMatch.attributes.contentRating {
+            enrichedSong.explicitRating = (rating == "explicit") ? 1 : (rating == "clean" ? 2 : 0)
+        }
+        
+        // 4. Copyright
+        if let firstAlbum = amsMatch.relationships?.albums?.data.first,
+           let cprt = firstAlbum.attributes.copyright {
+            enrichedSong.copyright = cprt
+        }
+        
+        // 5. Artist ID
+        if let firstArtist = amsMatch.relationships?.artists?.data.first,
+           let artistIdInt = Int64(firstArtist.id) {
+            enrichedSong.artistId = artistIdInt
+        }
+        
+        // 6. Composer ID
+        if let firstComposer = amsMatch.relationships?.composers?.data.first,
+           let composerIdInt = Int64(firstComposer.id) {
+            enrichedSong.composerId = composerIdInt
+        }
+        
+        // 7. Genre Store ID
+        if let firstGenre = amsMatch.relationships?.genres?.data.first,
+           let genreIdInt = Int64(firstGenre.id) {
+            enrichedSong.genreStoreId = genreIdInt
+        }
+        
+        // 8. Playlist/Album ID (plID)
+        if let firstAlbum = amsMatch.relationships?.albums?.data.first,
+           let albumIdInt = Int64(firstAlbum.id) {
+            enrichedSong.playlistId = albumIdInt
+        }
+        
+        // 9. Storefront ID (sfID)
+        let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
+        let storefrontMap: [String: Int64] = [
+            "us": 143441, "gb": 143444, "ca": 143455, "au": 143460,
+            "de": 143443, "fr": 143442, "jp": 143462, "mx": 143468,
+            "es": 143454, "it": 143450, "br": 143503, "kr": 143466,
+            "cn": 143465, "in": 143467, "ru": 143469, "se": 143456,
+            "nl": 143452, "no": 143457, "dk": 143458, "fi": 143447,
+            "at": 143445, "ch": 143459, "be": 143446, "ie": 143449,
+            "nz": 143461, "sg": 143464, "hk": 143463, "tw": 143470,
+            "ar": 143505, "cl": 143483, "co": 143501, "pe": 143507,
+            "ve": 143502, "ec": 143509, "cr": 143495, "pa": 143485,
+            "do": 143508, "gt": 143504, "hn": 143510, "sv": 143506,
+            "py": 143513, "uy": 143514, "bo": 143516, "ni": 143512,
+            "pr": 143522, "ph": 143474, "th": 143475, "my": 143473,
+            "id": 143476, "vn": 143471, "pk": 143477, "eg": 143516,
+            "sa": 143479, "ae": 143481, "il": 143491, "za": 143472,
+            "ng": 143561, "ke": 143529, "pt": 143453, "pl": 143478,
+            "tr": 143480, "ua": 143492, "ro": 143487, "hu": 143482,
+            "cz": 143489, "gr": 143448, "sk": 143496, "bg": 143526,
+            "hr": 143494, "lt": 143520, "lv": 143519, "ee": 143518,
+            "si": 143499, "lu": 143451, "mt": 143521
+        ]
+        enrichedSong.storefrontId = storefrontMap[region] ?? 143441
+        
+        // 10. Fetch Artwork
+        if let artworkUrl = amsMatch.attributes.artwork?.artworkURL() {
+            if let (data, _) = try? await URLSession.shared.data(from: artworkUrl) {
+                enrichedSong.artworkData = data
+            }
+        }
+        
+        enrichedSong.richAppleMetadataFetched = true
+        return enrichedSong
     }
 }
 
@@ -592,6 +702,8 @@ struct iTunesSong: Codable, Identifiable {
     let artistName: String?
     let collectionName: String?
     let primaryGenreName: String?
+    let artistId: Int?
+    let collectionId: Int?
     let releaseDate: String?
     let artworkUrl100: String?
     let trackNumber: Int?
@@ -626,20 +738,27 @@ extension SongMetadata {
     static func applyiTunesMatch(_ match: iTunesSong, to song: SongMetadata) async -> SongMetadata {
         var newSong = song
         
-        
         if let t = match.trackName { newSong.title = t }
         if let a = match.artistName { newSong.artist = a }
-        if let c = match.collectionName { newSong.album = c }
+        if let al = match.collectionName { newSong.album = al }
         if let g = match.primaryGenreName { newSong.genre = g }
+        if let aId = match.artistId { newSong.artistId = Int64(aId) }
+        if let cId = match.collectionId { newSong.playlistId = Int64(cId) }
+        if let tId = match.trackId { newSong.storeId = Int64(tId) }
+        newSong.storefrontId = 143441 // Default to US Storefront for injected tracks
         
         if let tn = match.trackNumber { newSong.trackNumber = tn }
         if let tc = match.trackCount { newSong.trackCount = tc }
         if let dn = match.discNumber { newSong.discNumber = dn }
         if let dc = match.discCount { newSong.discCount = dc }
         
-        if let dateStr = match.releaseDate,
-           let yearInt = Int(dateStr.prefix(4)) {
-            newSong.year = yearInt
+        if let dateStr = match.releaseDate {
+            if let yearInt = Int(dateStr.prefix(4)) {
+                newSong.year = yearInt
+            }
+            if let epoch = parseDateToEpoch(dateStr) {
+                newSong.releaseDate = epoch
+            }
         }
         
         
@@ -695,7 +814,42 @@ extension SongMetadata {
             return song
         }
         
-        return await applyiTunesMatch(match, to: song)
+        var enrichedSong = await applyiTunesMatch(match, to: song)
+        
+        // Shadow-search Apple Music for canonical IDs IF enabled or if Apple Music is the primary source
+        if UserDefaults.standard.bool(forKey: "appleRichMetadata") {
+            enrichedSong = await matchAppleMusicMetadata(enrichedSong)
+        }
+        
+        return enrichedSong
+    }
+    
+    static func enrichWithAppleMusicMetadata(_ song: SongMetadata) async -> SongMetadata {
+        print("[SongMetadata] Performing full Apple Music fetch for: \(song.artist) - \(song.title)")
+        let query = "\(song.artist) \(song.title)"
+        
+        if let amsMatch = await AppleMusicAPI.shared.searchSong(query: query) {
+            let enriched = await applyAppleMusicMatch(amsMatch, to: song)
+            print("[SongMetadata] ✓ Apple Music match: \(enriched.title) (\(enriched.storeId))")
+            return enriched
+        }
+        
+        return song
+    }
+    
+    /// Shadow-searches the official Apple Music API (AMP-API) to find official Store IDs, XID, and Copyright strings.
+    static func matchAppleMusicMetadata(_ song: SongMetadata) async -> SongMetadata {
+        let query = "\(song.artist) \(song.title)"
+        print("[SongMetadata] 🔍 Shadow-searching Apple Music for rich metadata: '\(query)'")
+        
+        if let amsMatch = await AppleMusicAPI.shared.searchSong(query: query) {
+            print("[SongMetadata] ✨ Found Apple Music Server Match: \(amsMatch.attributes.name) by \(amsMatch.attributes.artistName) (ID: \(amsMatch.id))")
+            return await applyAppleMusicMatch(amsMatch, to: song)
+        } else {
+            print("[SongMetadata] ⚠️ No rich metadata match found on Apple Music for: '\(query)'")
+        }
+        
+        return song
     }
 }
 
@@ -711,6 +865,7 @@ struct DeezerSong: Codable, Identifiable {
     let artist: DeezerReference
     let album: DeezerAlbumReference
     let duration: Int
+    let explicit_lyrics: Bool?
     
     
     var trackName: String { title }
@@ -775,6 +930,9 @@ extension SongMetadata {
         newSong.artist = match.artist.name
         newSong.album = match.album.title
         
+        if let explicit = match.explicit_lyrics {
+            newSong.explicitRating = explicit ? 1 : 0
+        }
         
         newSong.durationMs = match.duration * 1000
         
@@ -808,11 +966,206 @@ extension SongMetadata {
         let query = "\(song.artist) \(song.title)"
         let results = await searchDeezer(query: query)
         
+        var enrichedSong = song
         if let firstMatch = results.first {
              print("[SongMetadata] ✓ Deezer match: \(firstMatch.title) by \(firstMatch.artist.name)")
-             return await applyDeezerMatch(firstMatch, to: song)
+             enrichedSong = await applyDeezerMatch(firstMatch, to: song)
         }
         
-        return song
+        // Shadow-search Apple Music for canonical IDs IF enabled or if Apple Music is the primary source
+        if UserDefaults.standard.bool(forKey: "appleRichMetadata") {
+            enrichedSong = await matchAppleMusicMetadata(enrichedSong)
+        }
+        
+        return enrichedSong
+    }
+}
+// MARK: - Apple Music API
+actor AppleMusicAPI {
+    static let shared = AppleMusicAPI()
+    private var cachedToken: String?
+    
+    func getToken() async -> String? {
+        if let token = cachedToken { return token }
+        
+        print("[AppleMusicAPI] Fetching token via URLSession...")
+        
+        // Step 1: Fetch the Apple Music HTML page
+        guard let pageUrl = URL(string: "https://music.apple.com/us/browse") else { return nil }
+        var pageRequest = URLRequest(url: pageUrl)
+        pageRequest.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        
+        do {
+            let (htmlData, _) = try await URLSession.shared.data(for: pageRequest)
+            guard let html = String(data: htmlData, encoding: .utf8) else {
+                print("[AppleMusicAPI] ⚠️ Failed to decode HTML")
+                return nil
+            }
+            
+            // Step 2: Find the JS bundle URL containing the token
+            let scriptPattern = #"src="([^"]*\/assets\/index[^"]*\.js)""#
+            guard let scriptRegex = try? NSRegularExpression(pattern: scriptPattern),
+                  let scriptMatch = scriptRegex.firstMatch(in: html, range: NSRange(html.startIndex..<html.endIndex, in: html)),
+                  let scriptRange = Range(scriptMatch.range(at: 1), in: html) else {
+                print("[AppleMusicAPI] ⚠️ No index JS bundle found in HTML")
+                return nil
+            }
+            
+            let jsPath = String(html[scriptRange])
+            let jsUrlString = jsPath.hasPrefix("http") ? jsPath : "https://music.apple.com\(jsPath)"
+            guard let jsUrl = URL(string: jsUrlString) else {
+                print("[AppleMusicAPI] ⚠️ Invalid JS URL: \(jsUrlString)")
+                return nil
+            }
+            
+            print("[AppleMusicAPI] Found JS bundle: \(jsPath)")
+            
+            // Step 3: Fetch the JS bundle
+            var jsRequest = URLRequest(url: jsUrl)
+            jsRequest.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+            
+            let (jsData, _) = try await URLSession.shared.data(for: jsRequest)
+            guard let jsContent = String(data: jsData, encoding: .utf8) else {
+                print("[AppleMusicAPI] ⚠️ Failed to decode JS bundle")
+                return nil
+            }
+            
+            // Step 4: Extract the JWT token
+            let tokenPattern = #"eyJhbGciOi[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"#
+            guard let tokenRegex = try? NSRegularExpression(pattern: tokenPattern),
+                  let tokenMatch = tokenRegex.firstMatch(in: jsContent, range: NSRange(jsContent.startIndex..<jsContent.endIndex, in: jsContent)),
+                  let tokenRange = Range(tokenMatch.range, in: jsContent) else {
+                print("[AppleMusicAPI] ⚠️ No token found in JS bundle")
+                return nil
+            }
+            
+            let token = String(jsContent[tokenRange])
+            self.cachedToken = token
+            print("[AppleMusicAPI] ✅ Token fetched successfully via URLSession")
+            return token
+            
+        } catch {
+            print("[AppleMusicAPI] ⚠️ Token fetch failed: \(error)")
+            return nil
+        }
+    }
+    
+    struct AppleMusicSearchResponse: Codable {
+        let results: AppleMusicSearchResults
+    }
+    
+    struct AppleMusicSearchResults: Codable {
+        let songs: AppleMusicSongsPage?
+    }
+    
+    struct AppleMusicSongsPage: Codable {
+        let data: [AppleMusicSong]
+    }
+    
+    struct AppleMusicSong: Codable, Identifiable {
+        let id: String
+        let attributes: AppleMusicSongAttributes
+        let relationships: AppleMusicSongRelationships?
+    }
+    
+    struct AppleMusicSongAttributes: Codable {
+        let name: String
+        let artistName: String
+        let albumName: String?
+        let isrc: String?
+        let contentRating: String?
+        let releaseDate: String?
+        let artwork: AppleMusicArtwork?
+    }
+    
+    struct AppleMusicArtwork: Codable {
+        let width: Int
+        let height: Int
+        let url: String
+        
+        func artworkURL(width w: Int = 1000, height h: Int = 1000) -> URL? {
+            let processed = url.replacingOccurrences(of: "{w}", with: "\(w)")
+                             .replacingOccurrences(of: "{h}", with: "\(h)")
+            return URL(string: processed)
+        }
+    }
+    
+    struct AppleMusicSongRelationships: Codable {
+        let albums: AppleMusicAlbumsPage?
+        let artists: AppleMusicDataPage?
+        let composers: AppleMusicDataPage?
+        let genres: AppleMusicDataPage?
+    }
+    
+    struct AppleMusicDataPage: Codable {
+        let data: [AppleMusicReference]
+    }
+    
+    struct AppleMusicReference: Codable {
+        let id: String
+    }
+    
+    struct AppleMusicAlbumsPage: Codable {
+        let data: [AppleMusicAlbum]
+    }
+    
+    struct AppleMusicAlbum: Codable {
+        let id: String
+        let attributes: AppleMusicAlbumAttributes
+    }
+    
+    struct AppleMusicAlbumAttributes: Codable {
+        let copyright: String?
+        let releaseDate: String?
+    }
+    
+    func searchSongs(query: String, limit: Int = 5) async -> [AppleMusicSong] {
+        guard let token = await getToken() else { return [] }
+        
+        let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
+        var comp = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(region)/search")!
+        comp.queryItems = [
+            URLQueryItem(name: "term", value: query),
+            URLQueryItem(name: "types", value: "songs"),
+            URLQueryItem(name: "limit", value: String(limit)),
+            URLQueryItem(name: "include[songs]", value: "albums,artists,composers,genres")
+        ]
+        
+        guard let url = comp.url else { return [] }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("https://music.apple.com", forHTTPHeaderField: "Origin")
+        
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            let result = try JSONDecoder().decode(AppleMusicSearchResponse.self, from: data)
+            return result.results.songs?.data ?? []
+        } catch {
+            print("[AppleMusicAPI] Search failed: \(error)")
+            return []
+        }
+    }
+
+    func searchSong(query: String) async -> AppleMusicSong? {
+        return await searchSongs(query: query, limit: 1).first
+    }
+}
+
+extension SongMetadata {
+    static func parseDateToEpoch(_ dateStr: String) -> Int? {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        let formats = [
+            "yyyy-MM-dd",
+            "yyyy-MM-dd'T'HH:mm:ssZ",
+            "yyyy"
+        ]
+        for fmt in formats {
+            df.dateFormat = fmt
+            if let date = df.date(from: dateStr) {
+                return Int(date.timeIntervalSinceReferenceDate)
+            }
+        }
+        return nil
     }
 }

@@ -9,8 +9,11 @@ struct iTunesSearchSheet: View {
     @State private var searchQuery: String = ""
     @State private var itunesResults: [iTunesSong] = []
     @State private var deezerResults: [DeezerSong] = []
+    @State private var appleResults: [AppleMusicAPI.AppleMusicSong] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
+    
+    @State private var activeSource: String = "itunes"
     
     var body: some View {
         ZStack {
@@ -19,9 +22,44 @@ struct iTunesSearchSheet: View {
             
             VStack(spacing: 0) {
                 
-                HStack {
+                HStack(alignment: .lastTextBaseline, spacing: 10) {
                     Text("Select Match")
                         .font(.system(size: 24, weight: .bold))
+                    
+                    if metadataSource == "local" {
+                        Menu {
+                            Button("iTunes") { activeSource = "itunes" }
+                            Button("Deezer") { activeSource = "deezer" }
+                            Button("Apple Music") { activeSource = "apple" }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(activeSource == "apple" ? "Apple Music" : activeSource.capitalized)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(activeSource == "deezer" ? .red : .accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule()
+                                    .stroke(activeSource == "deezer" ? Color.red.opacity(0.3) : Color.accentColor.opacity(0.3), lineWidth: 1)
+                            )
+                        }
+                        .offset(y: -2)
+                    } else {
+                        Text(activeSource == "apple" ? "Apple Music" : activeSource.capitalized)
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(activeSource == "deezer" ? .red : .accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule()
+                                    .stroke(activeSource == "deezer" ? Color.red.opacity(0.3) : Color.accentColor.opacity(0.3), lineWidth: 1)
+                            )
+                            .offset(y: -2)
+                    }
+                    
                     Spacer()
                     Button {
                         isPresented = false
@@ -38,7 +76,7 @@ struct iTunesSearchSheet: View {
                 HStack {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    TextField("Search \(metadataSource == "deezer" ? "Deezer" : "iTunes (\(UserDefaults.standard.string(forKey: "storeRegion") ?? "US"))")...", text: $searchQuery)
+                    TextField("Search \(activeSource == "deezer" ? "Deezer" : (activeSource == "apple" ? "Apple Music" : "iTunes (\(UserDefaults.standard.string(forKey: "storeRegion") ?? "US"))"))...", text: $searchQuery)
                         .submitLabel(.search)
                         .onSubmit {
                             performSearch()
@@ -66,7 +104,7 @@ struct iTunesSearchSheet: View {
                     VStack(spacing: 12) {
                         ProgressView()
                             .scaleEffect(1.2)
-                        Text("Searching \(metadataSource == "deezer" ? "Deezer" : "iTunes (\(UserDefaults.standard.string(forKey: "storeRegion") ?? "US"))")...")
+                        Text("Searching \(activeSource == "deezer" ? "Deezer" : (activeSource == "apple" ? "Apple Music" : "iTunes (\(UserDefaults.standard.string(forKey: "storeRegion") ?? "US"))"))...")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -84,7 +122,8 @@ struct iTunesSearchSheet: View {
                             .padding(.horizontal)
                     }
                     Spacer()
-                } else if (metadataSource == "deezer" ? deezerResults.isEmpty : itunesResults.isEmpty) {
+                    Spacer()
+                } else if (activeSource == "deezer" ? deezerResults.isEmpty : (activeSource == "apple" ? appleResults.isEmpty : itunesResults.isEmpty)) {
                     Spacer()
                     VStack(spacing: 12) {
                         Image(systemName: "music.note.list")
@@ -101,7 +140,7 @@ struct iTunesSearchSheet: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            if metadataSource == "deezer" {
+                            if activeSource == "deezer" {
                                 ForEach(Array(deezerResults.enumerated()), id: \.element.id) { index, match in
                                     VStack(spacing: 0) {
                                         Button {
@@ -112,6 +151,21 @@ struct iTunesSearchSheet: View {
                                         .buttonStyle(PlainButtonStyle())
                                         
                                         if index < deezerResults.count - 1 {
+                                            Divider().padding(.leading, 80)
+                                        }
+                                    }
+                                }
+                            } else if activeSource == "apple" {
+                                ForEach(Array(appleResults.enumerated()), id: \.element.id) { index, match in
+                                    VStack(spacing: 0) {
+                                        Button {
+                                            applyAppleMatch(match)
+                                        } label: {
+                                            AppleMusicRow(match: match)
+                                        }
+                                        .buttonStyle(PlainButtonStyle())
+                                        
+                                        if index < appleResults.count - 1 {
                                             Divider().padding(.leading, 80)
                                         }
                                     }
@@ -139,10 +193,22 @@ struct iTunesSearchSheet: View {
             }
         }
         .onAppear {
+            if metadataSource == "local" {
+                activeSource = "itunes"
+            } else {
+                activeSource = metadataSource
+            }
+            
             if searchQuery.isEmpty {
                 searchQuery = "\(song.artist) \(song.title)"
                 performSearch()
             }
+        }
+        .onChange(of: activeSource) { _ in
+            itunesResults = []
+            deezerResults = []
+            appleResults = []
+            performSearch()
         }
     }
     
@@ -152,19 +218,24 @@ struct iTunesSearchSheet: View {
         errorMessage = nil
         
         Task {
-            if metadataSource == "deezer" {
+            if activeSource == "deezer" {
                  let results = await SongMetadata.searchDeezer(query: searchQuery)
                  await MainActor.run {
                      self.deezerResults = results
                      self.isLoading = false
-                     if results.isEmpty { self.errorMessage = nil }
+                 }
+            } else if activeSource == "apple" {
+                 // Fetch up to 10 results for the picker
+                 let results = await AppleMusicAPI.shared.searchSongs(query: searchQuery, limit: 10)
+                 await MainActor.run {
+                     self.appleResults = results
+                     self.isLoading = false
                  }
             } else {
                  let results = await SongMetadata.searchiTunes(query: searchQuery)
                  await MainActor.run {
                      self.itunesResults = results
                      self.isLoading = false
-                     if results.isEmpty { self.errorMessage = nil }
                  }
             }
         }
@@ -186,6 +257,19 @@ struct iTunesSearchSheet: View {
         isLoading = true
         Task {
             let updatedSong = await SongMetadata.applyDeezerMatch(match, to: song)
+            await MainActor.run {
+                self.song = updatedSong
+                self.isLoading = false
+                self.isPresented = false
+            }
+        }
+    }
+    
+    private func applyAppleMatch(_ match: AppleMusicAPI.AppleMusicSong) {
+        isLoading = true
+        Task {
+            let updatedSong = await SongMetadata.applyAppleMusicMatch(match, to: song)
+            
             await MainActor.run {
                 self.song = updatedSong
                 self.isLoading = false
@@ -240,6 +324,39 @@ struct DeezerRow: View {
                 Text(match.title).font(.body).foregroundColor(.primary).lineLimit(1)
                 Text(match.artist.name).font(.subheadline).foregroundColor(.secondary).lineLimit(1)
                 Text(match.album.title).font(.caption).foregroundColor(.secondary.opacity(0.8)).lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right").font(.caption).foregroundColor(Color(uiColor: .tertiaryLabel))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+}
+
+struct AppleMusicRow: View {
+    let match: AppleMusicAPI.AppleMusicSong
+    var body: some View {
+        HStack(spacing: 14) {
+            if let artwork = match.attributes.artwork {
+                AsyncImage(url: artwork.artworkURL(width: 200, height: 200)) { image in
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    Color(uiColor: .systemGray5)
+                        .overlay(Image(systemName: "music.note").foregroundColor(.secondary))
+                }
+                .frame(width: 48, height: 48).cornerRadius(6)
+            } else {
+                Color(uiColor: .systemGray5)
+                    .overlay(Image(systemName: "music.note").foregroundColor(.secondary))
+                    .frame(width: 48, height: 48).cornerRadius(6)
+            }
+            
+            VStack(alignment: .leading, spacing: 3) {
+                Text(match.attributes.name).font(.body).foregroundColor(.primary).lineLimit(1)
+                Text(match.attributes.artistName).font(.subheadline).foregroundColor(.secondary).lineLimit(1)
+                if let album = match.attributes.albumName {
+                    Text(album).font(.caption).foregroundColor(.secondary.opacity(0.8)).lineLimit(1)
+                }
             }
             Spacer()
             Image(systemName: "chevron.right").font(.caption).foregroundColor(Color(uiColor: .tertiaryLabel))

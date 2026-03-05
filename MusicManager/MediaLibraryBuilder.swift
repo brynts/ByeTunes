@@ -182,7 +182,7 @@ class MediaLibraryBuilder {
             db: db,
             songs: songs,
             existingArtists: [:],
-            existingAlbums: [:],
+            existingAlbums: [String: (pid: Int64, year: Int)](),
             existingGenres: [:],
             existingAlbumArtists: [:],
             version: version
@@ -419,16 +419,17 @@ class MediaLibraryBuilder {
     }
     
     
-    private static func getExistingAlbums(db: OpaquePointer?) -> [String: Int64] {
-        var albums: [String: Int64] = [:]
+    private static func getExistingAlbums(db: OpaquePointer?) -> [String: (pid: Int64, year: Int)] {
+        var albums: [String: (pid: Int64, year: Int)] = [:]
         var stmt: OpaquePointer?
         
-        if sqlite3_prepare_v2(db, "SELECT album, album_pid FROM album", -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, "SELECT album, album_pid, album_year FROM album", -1, &stmt, nil) == SQLITE_OK {
             while sqlite3_step(stmt) == SQLITE_ROW {
                 if let namePtr = sqlite3_column_text(stmt, 0) {
                     let name = String(cString: namePtr)
                     let pid = sqlite3_column_int64(stmt, 1)
-                    albums[name] = pid
+                    let year = sqlite3_column_int(stmt, 2)
+                    albums[name] = (pid, Int(year))
                 }
             }
         }
@@ -520,7 +521,7 @@ class MediaLibraryBuilder {
         db: OpaquePointer?,
         songs: [SongMetadata],
         existingArtists: [String: Int64],
-        existingAlbums: [String: Int64],
+        existingAlbums: [String: (pid: Int64, year: Int)],
         existingGenres: [String: Int64],
         existingAlbumArtists: [String: Int64],
         version: DatabaseVersion
@@ -548,15 +549,18 @@ class MediaLibraryBuilder {
         
         var newArtists: [String: Int64] = [:]
         var newAlbums: [String: Int64] = [:]
+        var updateAlbums: [String: Int64] = [:]
         var newGenres: [String: Int64] = [:]
         var newAlbumArtists: [String: Int64] = [:]
         
+        var artistStoreIds: [String: Int64] = [:]
+        var albumArtistStoreIds: [String: Int64] = [:]
+        var albumStoreIds: [String: Int64] = [:]
         
         var artistRepItem: [String: Int64] = [:]
         var albumRepItem: [String: Int64] = [:]
         var genreRepItem: [String: Int64] = [:]
         var albumArtistRepItem: [String: Int64] = [:]
-        
         
         var processedAlbumArtworkPids = Set<Int64>()
         
@@ -591,6 +595,7 @@ class MediaLibraryBuilder {
                 artists[song.artist] = newPid
                 newArtists[song.artist] = newPid
                 artistRepItem[song.artist] = itemPid  
+                artistStoreIds[song.artist] = song.artistId
                 artistPid = newPid
             }
             
@@ -604,18 +609,26 @@ class MediaLibraryBuilder {
                 albumArtists[effectiveAlbumArtistName] = newPid
                 newAlbumArtists[effectiveAlbumArtistName] = newPid
                 albumArtistRepItem[effectiveAlbumArtistName] = itemPid  
+                albumArtistStoreIds[effectiveAlbumArtistName] = song.artistId // Use artistId since AA is usually artist
                 albumArtistPid = newPid
             }
             
             
             let albumPid: Int64
             if let existing = albums[song.album] {
-                albumPid = existing
+                albumPid = existing.pid
+                // If existing album has a wrong year (or 0) and the song has a more accurate year, mark it for update
+                if (existing.year == 0 || existing.year == 2003 || existing.year != song.year) && song.year != 0 {
+                    updateAlbums[song.album] = albumPid
+                    // Update our in-memory lookup too so multiple songs on the same album don't clash
+                    albums[song.album] = (pid: albumPid, year: song.year)
+                }
             } else {
                 let newPid = SongMetadata.generatePersistentId()
-                albums[song.album] = newPid
+                albums[song.album] = (pid: newPid, year: song.year)
                 newAlbums[song.album] = newPid
                 albumRepItem[song.album] = itemPid  
+                albumStoreIds[song.album] = song.playlistId // Remember playlistId was mapped from collectionId
                 albumPid = newPid
             }
             
@@ -632,10 +645,10 @@ class MediaLibraryBuilder {
             }
             
             
-            let titleOrder = insertSortMap(db: db, name: song.title)
-            let artistOrder = insertSortMap(db: db, name: song.artist)
-            let albumOrder = insertSortMap(db: db, name: song.album)
-            let genreOrder = insertSortMap(db: db, name: song.genre)
+            let titleSort = insertSortMap(db: db, name: song.title)
+            let artistSort = insertSortMap(db: db, name: song.artist)
+            let albumSort = insertSortMap(db: db, name: song.album)
+            let genreSort = insertSortMap(db: db, name: song.genre)
             
              _ = insertSortMap(db: db, name: effectiveAlbumArtistName)
             
@@ -671,13 +684,13 @@ class MediaLibraryBuilder {
                     exclude_from_shuffle, keep_local, keep_local_status, keep_local_status_reason, keep_local_constraints,
                     in_my_library, is_compilation, date_added, show_composer, is_music_show, date_downloaded, download_source_container_pid
                 ) VALUES (
-                    \(itemPid), 8, \(titleOrder), 1,
-                    \(artistPid), \(artistOrder), 1,
-                    0, 27,
-                    \(albumPid), \(albumOrder), 1,
-                    \(albumArtistPid), \(artistOrder), 1,
-                    0, 0, 27,
-                    \(genreId), \(genreOrder), 1,
+                    \(itemPid), 8, \(titleSort.order), \(titleSort.section),
+                    \(artistPid), \(artistSort.order), \(artistSort.section),
+                    0, 26,
+                    \(albumPid), \(albumSort.order), \(albumSort.section),
+                    \(albumArtistPid), \(artistSort.order), \(artistSort.section),
+                    0, 0, 26,
+                    \(genreId), \(genreSort.order), \(genreSort.section),
                     \(dbDiscNum), \(dbTrackNum), 1,
                     3840, 0,
                     0, 1, 2, 0, 0,
@@ -688,17 +701,18 @@ class MediaLibraryBuilder {
             
             let escapedTitle = song.title.replacingOccurrences(of: "'", with: "''")
             let escapedFilename = song.remoteFilename.replacingOccurrences(of: "'", with: "''")
+            let escapedCopyright = song.copyright?.replacingOccurrences(of: "'", with: "''") ?? ""
             try executeSQL(db, """
                 INSERT INTO item_extra (
                     item_pid, title, sort_title, disc_count, track_count, total_time_ms, year,
                     location, file_size, integrity, is_audible_audio_book, date_modified,
                     media_kind, content_rating, content_rating_level, is_user_disabled, bpm, genius_id,
-                    location_kind_id
+                    location_kind_id, copyright
                 ) VALUES (
                     \(itemPid), '\(escapedTitle)', '\(escapedTitle)', \(dbDiscCount), \(dbTrackCount), \(song.durationMs), \(song.year),
                     '\(escapedFilename)', \(song.fileSize), \(MediaLibraryBuilder.generateIntegrityHex(filename: song.remoteFilename)), 0, \(now),
-                    1, 0, 0, 0, 0, 0,
-                    42
+                    1, \(song.explicitRating), 0, 0, 0, 0,
+                    42, '\(escapedCopyright)'
                 )
             """)
             
@@ -720,7 +734,20 @@ class MediaLibraryBuilder {
             
             
             let syncId = SongMetadata.generatePersistentId()
-            try executeSQL(db, "INSERT OR REPLACE INTO item_store (item_pid, sync_id, sync_in_my_library, is_subscription) VALUES (\(itemPid), \(syncId), 1, \(version.isSubscription ? 1 : 0))")
+            let storeXidEscaped = song.xid?.replacingOccurrences(of: "'", with: "''") ?? ""
+            try executeSQL(db, """
+                INSERT OR REPLACE INTO item_store (
+                    item_pid, sync_id, sync_in_my_library, is_subscription,
+                    store_xid, store_item_id, storefront_id,
+                    store_composer_id, store_genre_id, store_playlist_id,
+                    date_released
+                ) VALUES (
+                    \(itemPid), \(syncId), 1, \(version.isSubscription ? 1 : 0),
+                    '\(storeXidEscaped)', \(song.storeId), \(song.storefrontId),
+                    \(song.composerId), \(song.genreStoreId), \(song.playlistId),
+                    \(song.releaseDate)
+                )
+            """)
             
             
             try executeSQL(db, "INSERT OR REPLACE INTO item_video (item_pid) VALUES (\(itemPid))")
@@ -728,7 +755,7 @@ class MediaLibraryBuilder {
             
             try executeSQL(db, """
                 INSERT OR REPLACE INTO item_search (item_pid, search_title, search_album, search_artist, search_composer, search_album_artist)
-                VALUES (\(itemPid), \(titleOrder), \(albumOrder), \(artistOrder), 0, \(artistOrder))
+                VALUES (\(itemPid), \(titleSort.order), \(albumSort.order), \(artistSort.order), 0, \(artistSort.order))
             """)
             
             
@@ -748,7 +775,7 @@ class MediaLibraryBuilder {
             
             if song.artworkData != nil {
                 
-                let artToken = "100\(trackNum)"
+                let artToken = "\(itemPid)"
                 
                 
                 var sha1Hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
@@ -962,9 +989,10 @@ class MediaLibraryBuilder {
             let groupingHex = groupingKey.map { String(format: "%02x", $0) }.joined()
             let syncId = SongMetadata.generatePersistentId()
             let repItem = artistRepItem[artistName] ?? 0
+            let storeId = artistStoreIds[artistName] ?? 0
             try executeSQL(db, """
-                INSERT INTO item_artist (item_artist_pid, item_artist, sort_item_artist, series_name, grouping_key, sync_id, keep_local, representative_item_pid)
-                VALUES (\(artistPid), '\(escapedName)', '\(escapedName)', '', X'\(groupingHex)', \(syncId), 1, \(repItem))
+                INSERT INTO item_artist (item_artist_pid, item_artist, sort_item_artist, series_name, grouping_key, sync_id, keep_local, representative_item_pid, store_id)
+                VALUES (\(artistPid), '\(escapedName)', '\(escapedName)', '', X'\(groupingHex)', \(syncId), 1, \(repItem), \(storeId))
             """)
         }
         
@@ -975,35 +1003,28 @@ class MediaLibraryBuilder {
             let groupingHex = groupingKey.map { String(format: "%02x", $0) }.joined()
             let syncId = SongMetadata.generatePersistentId()
             let repItem = albumArtistRepItem[artistName] ?? 0
+            let storeId = albumArtistStoreIds[artistName] ?? 0
             
-            let nameOrder = insertSortMap(db: db, name: artistName)
+            let sortResult = insertSortMap(db: db, name: artistName)
             
-            var sortOrderSection = 27
-            if let firstChar = artistName.uppercased().first {
-                let charValue = Int(firstChar.asciiValue ?? 0)
-                if charValue >= 65 && charValue <= 90 { 
-                    sortOrderSection = charValue - 64 
-                }
-            }
-            // Check at runtime whether the existing DB actually has these newer columns —
-            // older iOS 17/18 builds may lack sort_order / name_order even though the
-            // version flag says they should be present.
+            let sortOrderSection = sortResult.section
+            
             let hasSortOrder = version.hasAlbumArtistSortColumns && columnExists(db: db, tableName: "album_artist", columnName: "sort_order")
             let hasNameOrder = version.hasAlbumArtistSortColumns && columnExists(db: db, tableName: "album_artist", columnName: "name_order")
             if hasSortOrder && hasNameOrder {
                 try executeSQL(db, """
-                    INSERT INTO album_artist (album_artist_pid, album_artist, sort_album_artist, grouping_key, sync_id, keep_local, representative_item_pid, sort_order, sort_order_section, name_order)
-                    VALUES (\(aaPid), '\(escapedName)', '\(escapedName)', X'\(groupingHex)', \(syncId), 1, \(repItem), \(nameOrder), \(sortOrderSection), \(nameOrder))
+                    INSERT INTO album_artist (album_artist_pid, album_artist, sort_album_artist, grouping_key, sync_id, keep_local, representative_item_pid, sort_order, sort_order_section, name_order, store_id)
+                    VALUES (\(aaPid), '\(escapedName)', '\(escapedName)', X'\(groupingHex)', \(syncId), 1, \(repItem), \(sortResult.order), \(sortOrderSection), \(sortResult.order), \(storeId))
                 """)
             } else if hasSortOrder {
                 try executeSQL(db, """
-                    INSERT INTO album_artist (album_artist_pid, album_artist, sort_album_artist, grouping_key, sync_id, keep_local, representative_item_pid, sort_order, sort_order_section)
-                    VALUES (\(aaPid), '\(escapedName)', '\(escapedName)', X'\(groupingHex)', \(syncId), 1, \(repItem), \(nameOrder), \(sortOrderSection))
+                    INSERT INTO album_artist (album_artist_pid, album_artist, sort_album_artist, grouping_key, sync_id, keep_local, representative_item_pid, sort_order, sort_order_section, store_id)
+                    VALUES (\(aaPid), '\(escapedName)', '\(escapedName)', X'\(groupingHex)', \(syncId), 1, \(repItem), \(sortResult.order), \(sortOrderSection), \(storeId) )
                 """)
             } else {
                 try executeSQL(db, """
-                    INSERT INTO album_artist (album_artist_pid, album_artist, sort_album_artist, grouping_key, sync_id, keep_local, representative_item_pid)
-                    VALUES (\(aaPid), '\(escapedName)', '\(escapedName)', X'\(groupingHex)', \(syncId), 1, \(repItem))
+                    INSERT INTO album_artist (album_artist_pid, album_artist, sort_album_artist, grouping_key, sync_id, keep_local, representative_item_pid, store_id)
+                    VALUES (\(aaPid), '\(escapedName)', '\(escapedName)', X'\(groupingHex)', \(syncId), 1, \(repItem), \(storeId))
                 """)
             }
         }
@@ -1013,6 +1034,8 @@ class MediaLibraryBuilder {
             let escapedName = albumName.replacingOccurrences(of: "'", with: "''")
             let groupingKey = SongMetadata.generateGroupingKey(albumName)
             let groupingHex = groupingKey.map { String(format: "%02x", $0) }.joined()
+            let storeId = albumStoreIds[albumName] ?? 0
+            
             if let song = songs.first(where: { $0.album == albumName }) {
                
                 let effectiveName = song.albumArtist ?? song.artist
@@ -1021,9 +1044,17 @@ class MediaLibraryBuilder {
                 let syncId = SongMetadata.generatePersistentId()
                 let repItem = albumRepItem[albumName] ?? 0
                 try executeSQL(db, """
-                    INSERT INTO album (album_pid, album, sort_album, album_artist_pid, grouping_key, album_year, keep_local, sync_id, representative_item_pid)
-                    VALUES (\(albumPid), '\(escapedName)', '\(escapedName)', \(aaPid), X'\(groupingHex)', \(song.year), 1, \(syncId), \(repItem))
+                    INSERT INTO album (album_pid, album, sort_album, album_artist_pid, grouping_key, album_year, keep_local, sync_id, representative_item_pid, store_id)
+                    VALUES (\(albumPid), '\(escapedName)', '\(escapedName)', \(aaPid), X'\(groupingHex)', \(song.year), 1, \(syncId), \(repItem), \(storeId))
                 """)
+            }
+        }
+        
+        // Force update existing albums that have wrong metadata
+        for (albumName, albumPid) in updateAlbums {
+            if let song = songs.first(where: { $0.album == albumName }), song.year != 0 {
+                try executeSQL(db, "UPDATE album SET album_year = \(song.year) WHERE album_pid = \(albumPid)")
+                Logger.shared.log("[MediaLibraryBuilder] Updating existing album year to \(song.year) for: \(albumName)")
             }
         }
         
@@ -1039,6 +1070,74 @@ class MediaLibraryBuilder {
             """)
         }
         
+        
+        // Reorder sort_map alphabetically and cascade to item table (permanent fixup)
+        print("[MediaLibraryBuilder] 🔧 SORT FIX: Reordering sort_map alphabetically...")
+        
+        // Step 0: Fix all name_section values in sort_map (recompute from name text, 0-indexed)
+        // Handles accented characters (À-Å→A, Ç→C, È-Ë→E, Ì-Ï→I, Ñ→N, Ò-Ö→O, Ù-Ü→U, Ý→Y)
+        try? executeSQL(db, """
+            UPDATE sort_map SET name_section = 
+                CASE 
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 65 AND 90 
+                    THEN UNICODE(UPPER(SUBSTR(name, 1, 1))) - 65
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 192 AND 197 THEN 0
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) = 199 THEN 2
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 200 AND 203 THEN 4
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 204 AND 207 THEN 8
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) = 209 THEN 13
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 210 AND 214 THEN 14
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 217 AND 220 THEN 20
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) = 221 THEN 24
+                    ELSE 26
+                END
+        """)
+        
+        // Step 1: Create temp table with correct alphabetical ordering
+        try? executeSQL(db, "DROP TABLE IF EXISTS _sort_reorder")
+        try? executeSQL(db, """
+            CREATE TEMP TABLE _sort_reorder AS
+            SELECT name, name_order AS old_order, name_section,
+                   ROW_NUMBER() OVER (ORDER BY 
+                       CASE name_section WHEN 26 THEN -1 ELSE name_section END ASC,
+                       sort_key ASC
+                   ) AS new_order
+            FROM sort_map
+        """)
+        
+        // Step 2: Update item table — remap all _order columns and set correct _order_section
+        try? executeSQL(db, """
+            UPDATE item SET
+                title_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.title_order), title_order),
+                title_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.title_order), title_order_section),
+                item_artist_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.item_artist_order), item_artist_order),
+                item_artist_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.item_artist_order), item_artist_order_section),
+                album_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.album_order), album_order),
+                album_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.album_order), album_order_section),
+                album_artist_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.album_artist_order), album_artist_order),
+                album_artist_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.album_artist_order), album_artist_order_section),
+                genre_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.genre_order), genre_order),
+                genre_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.genre_order), genre_order_section)
+        """)
+        
+        // Step 3: Update sort_map itself
+        try? executeSQL(db, """
+            UPDATE sort_map SET name_order = (
+                SELECT new_order FROM _sort_reorder WHERE _sort_reorder.name = sort_map.name
+            )
+        """)
+        
+        // Step 4: Update item_search to match new orders
+        try? executeSQL(db, """
+            UPDATE item_search SET
+                search_title = (SELECT title_order FROM item WHERE item.item_pid = item_search.item_pid),
+                search_album = (SELECT album_order FROM item WHERE item.item_pid = item_search.item_pid),
+                search_artist = (SELECT item_artist_order FROM item WHERE item.item_pid = item_search.item_pid),
+                search_album_artist = (SELECT album_artist_order FROM item WHERE item.item_pid = item_search.item_pid)
+        """)
+        
+        try? executeSQL(db, "DROP TABLE IF EXISTS _sort_reorder")
+        print("[MediaLibraryBuilder] ✅ Sort reorder complete")
         
         print("[MediaLibraryBuilder] Fixing existing records without sync_id...")
         
@@ -1309,16 +1408,17 @@ class MediaLibraryBuilder {
     
     
     
-    private static func insertSortMap(db: OpaquePointer?, name: String) -> Int64 {
+    private static func insertSortMap(db: OpaquePointer?, name: String) -> (order: Int64, section: Int) {
         let escapedName = name.replacingOccurrences(of: "'", with: "''")
         
         
         var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT name_order FROM sort_map WHERE name = '\(escapedName)'", -1, &stmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, "SELECT name_order, name_section FROM sort_map WHERE name = '\(escapedName)'", -1, &stmt, nil) == SQLITE_OK {
             if sqlite3_step(stmt) == SQLITE_ROW {
                 let existingOrder = sqlite3_column_int64(stmt, 0)
+                let existingSection = Int(sqlite3_column_int(stmt, 1))
                 sqlite3_finalize(stmt)
-                return existingOrder
+                return (existingOrder, existingSection)
             }
         }
         sqlite3_finalize(stmt)
@@ -1335,11 +1435,12 @@ class MediaLibraryBuilder {
         let nameOrder = maxOrder + 1
         
         
-        var nameSection = 27
-        if let firstChar = name.uppercased().first {
+        var nameSection = 26
+        let normalized = name.folding(options: .diacriticInsensitive, locale: .current)
+        if let firstChar = normalized.uppercased().first {
             let charValue = Int(firstChar.asciiValue ?? 0)
             if charValue >= 65 && charValue <= 90 { 
-                nameSection = charValue - 64 
+                nameSection = charValue - 65 
             }
         }
         
@@ -1356,7 +1457,7 @@ class MediaLibraryBuilder {
             Logger.shared.log("[MediaLibraryBuilder] sort_map insert error: \(error)")
         }
         
-        return nameOrder
+        return (nameOrder, nameSection)
     }
     
     
@@ -1371,7 +1472,7 @@ class MediaLibraryBuilder {
         let now = Int64(Date().timeIntervalSince1970)
         
         
-        let nameOrder = insertSortMap(db: db, name: playlistName)
+        let nameOrderResult = insertSortMap(db: db, name: playlistName)
         
         
         let containerSQL = """
@@ -1385,7 +1486,7 @@ class MediaLibraryBuilder {
         if sqlite3_prepare_v2(db, containerSQL, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_int64(stmt, 1, containerPid)
             sqlite3_bind_text(stmt, 2, playlistName, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-            sqlite3_bind_int64(stmt, 3, Int64(nameOrder))
+            sqlite3_bind_int64(stmt, 3, Int64(nameOrderResult.order))
             sqlite3_bind_int64(stmt, 4, now)
             sqlite3_bind_int64(stmt, 5, now)
             
@@ -1509,26 +1610,82 @@ class MediaLibraryBuilder {
     
     
     
+    /// Opens an existing database, inserts ringtone rows, and returns the modified DB URL.
+    /// Used for iOS 18 and under where ringtones need database entries to show in Settings.
+    static func addRingtonesToExistingDatabase(
+        existingDbData: Data,
+        walData: Data? = nil,
+        shmData: Data? = nil,
+        ringtones: [SongMetadata]
+    ) throws -> URL {
+        let tempDir = FileManager.default.temporaryDirectory
+        let dbPath = tempDir.appendingPathComponent("RingtoneDB.sqlitedb")
+        
+        try? FileManager.default.removeItem(at: dbPath)
+        try? FileManager.default.removeItem(at: tempDir.appendingPathComponent("RingtoneDB.sqlitedb-wal"))
+        try? FileManager.default.removeItem(at: tempDir.appendingPathComponent("RingtoneDB.sqlitedb-shm"))
+        
+        try existingDbData.write(to: dbPath)
+        
+        if let wal = walData {
+            try wal.write(to: tempDir.appendingPathComponent("RingtoneDB.sqlitedb-wal"))
+        }
+        if let shm = shmData {
+            try shm.write(to: tempDir.appendingPathComponent("RingtoneDB.sqlitedb-shm"))
+        }
+        
+        var db: OpaquePointer?
+        guard sqlite3_open(dbPath.path, &db) == SQLITE_OK else {
+            throw MediaLibraryError.databaseOpenFailed
+        }
+        defer { sqlite3_close(db) }
+        
+        // Checkpoint WAL if present
+        if walData != nil {
+            var errorMsg: UnsafeMutablePointer<CChar>?
+            sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, &errorMsg)
+            if let msg = errorMsg { sqlite3_free(msg) }
+        }
+        
+        // Switch to DELETE journal mode for clean upload
+        sqlite3_exec(db, "PRAGMA journal_mode=DELETE", nil, nil, nil)
+        
+        try insertRingtones(db: db, ringtones: ringtones)
+        
+        Logger.shared.log("[MediaLibraryBuilder] Ringtone DB entries inserted for \(ringtones.count) ringtones")
+        
+        // Clean up WAL/SHM leftovers
+        try? FileManager.default.removeItem(at: tempDir.appendingPathComponent("RingtoneDB.sqlitedb-wal"))
+        try? FileManager.default.removeItem(at: tempDir.appendingPathComponent("RingtoneDB.sqlitedb-shm"))
+        
+        return dbPath
+    }
+    
     @discardableResult
     static func insertRingtones(db: OpaquePointer?, ringtones: [SongMetadata]) throws -> [Int64] {
         let now = Int(Date().timeIntervalSince1970)
         var insertedPids: [Int64] = []
         
+        Logger.shared.log("[Ringtone-DB] insertRingtones called with \(ringtones.count) ringtones, db=\(db != nil ? "valid" : "NIL")")
         
         let baseLocSQL = "INSERT OR IGNORE INTO base_location (base_location_id, path) VALUES (3900, 'iTunes_Control/Ringtones')"
         var baseErrMsg: UnsafeMutablePointer<CChar>?
-        if sqlite3_exec(db, baseLocSQL, nil, nil, &baseErrMsg) != SQLITE_OK {
+        let baseResult = sqlite3_exec(db, baseLocSQL, nil, nil, &baseErrMsg)
+        if baseResult != SQLITE_OK {
             let error = baseErrMsg.map { String(cString: $0) } ?? "Unknown error"
             sqlite3_free(baseErrMsg)
-            Logger.shared.log("[MediaLibraryBuilder] Warning: Failed to insert ringtone base location: \(error)")
+            Logger.shared.log("[Ringtone-DB] WARNING: base_location insert failed: \(error) (code: \(baseResult))")
+        } else {
+            Logger.shared.log("[Ringtone-DB] base_location insert OK")
         }
         
         for ringtone in ringtones {
             let itemPid = SongMetadata.generatePersistentId()
             insertedPids.append(itemPid)
+            Logger.shared.log("[Ringtone-DB] Inserting ringtone '\(ringtone.title)' with pid=\(itemPid)")
             
             
-            let titleOrder = insertSortMap(db: db, name: ringtone.title)
+            let titleSortResult = insertSortMap(db: db, name: ringtone.title)
             
             Logger.shared.log("[MediaLibraryBuilder] Adding Ringtone: \(ringtone.title) -> \(ringtone.remoteFilename)")
             
@@ -1547,7 +1704,7 @@ class MediaLibraryBuilder {
                     exclude_from_shuffle, keep_local, keep_local_status, keep_local_status_reason, keep_local_constraints,
                     in_my_library, is_compilation, date_added, show_composer, is_music_show, date_downloaded, download_source_container_pid
                 ) VALUES (
-                    \(itemPid), 16384, \(titleOrder), 1,
+                    \(itemPid), 16384, \(titleSortResult.order), \(titleSortResult.section),
                     0, 0, 0,
                     0, 27,
                     33003300, 0, 0,
@@ -1560,6 +1717,7 @@ class MediaLibraryBuilder {
                     1, 0, \(now), 0, 0, \(now), 0
                 )
             """)
+            Logger.shared.log("[Ringtone-DB] ✓ item INSERT OK for pid=\(itemPid)")
             
             
             
@@ -1581,6 +1739,7 @@ class MediaLibraryBuilder {
                     42
                 )
             """)
+            Logger.shared.log("[Ringtone-DB] ✓ item_extra INSERT OK")
             
             
             let audioFmt = audioFormatForExtension("m4r") 
@@ -1593,14 +1752,19 @@ class MediaLibraryBuilder {
                     0, 0, 0, 44100.0
                 )
             """)
+            Logger.shared.log("[Ringtone-DB] ✓ item_playback INSERT OK")
             
             
             try executeSQL(db, "INSERT INTO item_stats (item_pid, date_accessed) VALUES (\(itemPid), \(now))")
+            Logger.shared.log("[Ringtone-DB] ✓ item_stats INSERT OK")
             
             
             let syncId = SongMetadata.generatePersistentId()
             try executeSQL(db, "INSERT INTO item_store (item_pid, sync_id, sync_in_my_library) VALUES (\(itemPid), \(syncId), 1)")
+            Logger.shared.log("[Ringtone-DB] ✓ item_store INSERT OK")
         }
+        
+        Logger.shared.log("[Ringtone-DB] insertRingtones complete — \(insertedPids.count) ringtones inserted successfully")
         
         return insertedPids
     }

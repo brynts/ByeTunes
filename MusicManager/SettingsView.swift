@@ -22,6 +22,7 @@ struct SettingsView: View {
     @AppStorage("autofetchMetadata") private var autofetchMetadata = true
     @AppStorage("fetchLyrics") private var fetchLyrics = false
     @AppStorage("storeRegion") private var storeRegion = "US"
+    @AppStorage("appleRichMetadata") private var appleRichMetadata = true
     
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -140,7 +141,7 @@ struct SettingsView: View {
                             
                             Spacer()
                             
-                            Text("1.0.1")
+                            Text("1.0.3")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                         }
@@ -221,6 +222,7 @@ struct SettingsView: View {
                                 Text("Local Files").tag("local")
                                 Text("iTunes API").tag("itunes")
                                 Text("Deezer API").tag("deezer")
+                                Text("Apple Music").tag("apple")
                             }
                             .pickerStyle(.menu)
                             .labelsHidden()
@@ -228,7 +230,31 @@ struct SettingsView: View {
                         .padding(.vertical, 14)
                         .padding(.horizontal, 16)
                         
-                        if metadataSource == "itunes" || metadataSource == "deezer" {
+                        if metadataSource != "apple" {
+                            Divider().padding(.leading, 56)
+                            
+                            Toggle(isOn: $appleRichMetadata) {
+                                HStack {
+                                    Image(systemName: "sparkles")
+                                        .font(.body)
+                                        .foregroundColor(.orange)
+                                        .frame(width: 28)
+                                    
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Rich Apple Metadata")
+                                            .font(.body)
+                                        Text("Fetch Store IDs, XID, and Copyright info")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                            .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 16)
+                        }
+                        
+                        if metadataSource == "itunes" || metadataSource == "deezer" || metadataSource == "apple" {
                             Divider().padding(.leading, 56)
                             
                             Toggle(isOn: $autofetchMetadata) {
@@ -250,51 +276,29 @@ struct SettingsView: View {
                             .toggleStyle(SwitchToggleStyle(tint: .accentColor))
                             .padding(.vertical, 10)
                             .padding(.horizontal, 16)
-                            
-                            Divider().padding(.leading, 56)
-                            
-                            Toggle(isOn: $fetchLyrics) {
-                                HStack {
-                                    Image(systemName: "quote.bubble.fill")
-                                        .font(.body)
-                                        .foregroundColor(.primary)
-                                        .frame(width: 28)
-                                    
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Fetch Lyrics")
-                                            .font(.body)
-                                        Text("Automatically fetch lyrics from LRCLIB")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                            .toggleStyle(SwitchToggleStyle(tint: .accentColor))
-                            .padding(.vertical, 10)
-                            .padding(.horizontal, 16)
-                        } else {
-                            // Also show lyrics toggle even if metadata source is local
-                            Divider().padding(.leading, 56)
-                            
-                            Toggle(isOn: $fetchLyrics) {
-                                HStack {
-                                    Image(systemName: "quote.bubble.fill")
-                                        .font(.body)
-                                        .foregroundColor(.primary)
-                                        .frame(width: 28)
-                                    
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("Fetch Lyrics")
-                                            .font(.body)
-                                        Text("Automatically fetch lyrics from LRCLIB")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                            .padding(.vertical, 10)
-                            .padding(.horizontal, 16)
                         }
+                        
+                        Divider().padding(.leading, 56)
+                        
+                        Toggle(isOn: $fetchLyrics) {
+                            HStack {
+                                Image(systemName: "quote.bubble.fill")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                    .frame(width: 28)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Fetch Lyrics")
+                                        .font(.body)
+                                    Text("Automatically fetch lyrics from LRCLIB")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 16)
                         
                         if metadataSource == "itunes" {
                                 Divider().padding(.leading, 56)

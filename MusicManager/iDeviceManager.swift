@@ -18,7 +18,7 @@ typealias IdeviceErrorCode = UnsafeMutablePointer<IdeviceFfiError>?
 let IdeviceSuccess: IdeviceErrorCode = nil
 
 
-private let BUILD_VERSION = "v1.0.1"
+private let BUILD_VERSION = "v1.0.3"
 
 class DeviceManager: ObservableObject {
     @Published var heartbeatReady: Bool = false
@@ -1371,6 +1371,111 @@ class DeviceManager: ObservableObject {
                 Logger.shared.log("[DeviceManager] Ringtones.plist uploaded (\(ringtonesDict.count) total entries)")
             } catch {
                 Logger.shared.log("[DeviceManager] Failed to upload Ringtones.plist: \(error)")
+            }
+            
+            // ── Step 5: For iOS 18 and under, also insert into the database ──
+            let version = self.getDatabaseVersion()
+            let iosMajor = version.major
+            Logger.shared.log("[Ringtone-DB] Version check: iOS \(iosMajor) (isSubscription: \(version.isSubscription))")
+            
+            if iosMajor <= 18 {
+                Logger.shared.log("[Ringtone-DB] iOS \(iosMajor) ≤ 18 — will insert ringtones into database")
+                progress("Updating database for iOS \(iosMajor)...")
+                
+                // Download existing DB
+                var existingDbData: Data?
+                var walData: Data?
+                var shmData: Data?
+                
+                Logger.shared.log("[Ringtone-DB] Downloading MediaLibrary.sqlitedb...")
+                let semDb = DispatchSemaphore(value: 0)
+                self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { data in
+                    existingDbData = data
+                    semDb.signal()
+                }
+                semDb.wait()
+                Logger.shared.log("[Ringtone-DB] DB download: \(existingDbData?.count ?? 0) bytes")
+                
+                Logger.shared.log("[Ringtone-DB] Downloading WAL...")
+                let semWal = DispatchSemaphore(value: 0)
+                self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal") { data in
+                    walData = data
+                    semWal.signal()
+                }
+                semWal.wait()
+                Logger.shared.log("[Ringtone-DB] WAL download: \(walData?.count ?? 0) bytes")
+                
+                Logger.shared.log("[Ringtone-DB] Downloading SHM...")
+                let semShm = DispatchSemaphore(value: 0)
+                self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm") { data in
+                    shmData = data
+                    semShm.signal()
+                }
+                semShm.wait()
+                Logger.shared.log("[Ringtone-DB] SHM download: \(shmData?.count ?? 0) bytes")
+                
+                if let dbData = existingDbData, dbData.count > 1000 {
+                    Logger.shared.log("[Ringtone-DB] DB is valid (\(dbData.count) bytes), proceeding with insertion...")
+                    Logger.shared.log("[Ringtone-DB] Ringtones to insert: \(ringtones.count)")
+                    for (i, rt) in ringtones.enumerated() {
+                        Logger.shared.log("[Ringtone-DB]   [\(i)] title='\(rt.title)' file='\(rt.remoteFilename)' size=\(rt.fileSize) duration=\(rt.durationMs)")
+                    }
+                    
+                    do {
+                        let dbURL = try MediaLibraryBuilder.addRingtonesToExistingDatabase(
+                            existingDbData: dbData,
+                            walData: walData,
+                            shmData: shmData,
+                            ringtones: ringtones
+                        )
+                        Logger.shared.log("[Ringtone-DB] DB modification successful, output at: \(dbURL.path)")
+                        
+                        // Check output file size
+                        let attrs = try? FileManager.default.attributesOfItem(atPath: dbURL.path)
+                        let outputSize = (attrs?[.size] as? Int) ?? 0
+                        Logger.shared.log("[Ringtone-DB] Modified DB size: \(outputSize) bytes")
+                        
+                        // Atomic DB upload
+                        let tempDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb.temp"
+                        let finalDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+                        let shmPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm"
+                        let walPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal"
+                        
+                        Logger.shared.log("[Ringtone-DB] Uploading modified DB to temp path...")
+                        let semUpload = DispatchSemaphore(value: 0)
+                        var uploadOK = false
+                        self.uploadFileToDevice(localURL: dbURL, remotePath: tempDBPath) { success in
+                            uploadOK = success
+                            semUpload.signal()
+                        }
+                        semUpload.wait()
+                        Logger.shared.log("[Ringtone-DB] Upload result: \(uploadOK ? "SUCCESS" : "FAILED")")
+                        
+                        if uploadOK {
+                            Logger.shared.log("[Ringtone-DB] Performing atomic swap...")
+                            var afcSwap: AfcClientHandle?
+                            afc_client_connect(self.provider, &afcSwap)
+                            if afcSwap != nil {
+                                afc_remove_path(afcSwap, shmPath)
+                                afc_remove_path(afcSwap, walPath)
+                                afc_remove_path(afcSwap, finalDBPath)
+                                let renameErr = afc_rename_path(afcSwap, tempDBPath, finalDBPath)
+                                afc_client_free(afcSwap)
+                                Logger.shared.log("[Ringtone-DB] Atomic swap complete (rename result: \(String(describing: renameErr)))")
+                            } else {
+                                Logger.shared.log("[Ringtone-DB] ERROR: AFC client is nil for swap")
+                            }
+                        } else {
+                            Logger.shared.log("[Ringtone-DB] ERROR: Failed to upload ringtone DB")
+                        }
+                    } catch {
+                        Logger.shared.log("[Ringtone-DB] ERROR: Failed to insert ringtones into DB: \(error)")
+                    }
+                } else {
+                    Logger.shared.log("[Ringtone-DB] ERROR: No valid database found (data=\(existingDbData?.count ?? 0) bytes), skipping DB insertion")
+                }
+            } else {
+                Logger.shared.log("[Ringtone-DB] iOS \(iosMajor) > 18 — skipping DB insertion (plist-only)")
             }
 
             progress("Done!")

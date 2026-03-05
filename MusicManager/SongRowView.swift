@@ -38,6 +38,22 @@ struct SongRowView: View {
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                     
+                    if song.explicitRating == 1 {
+                        Text("E")
+                            .font(.system(size: 8, weight: .black))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(Color.red)
+                            .foregroundColor(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
+                    
+                    if song.richAppleMetadataFetched {
+                        Image(systemName: "applelogo")
+                            .font(.system(size: 10))
+                            .foregroundColor(Color.accentColor)
+                    }
+                    
                     if let lyrics = song.lyrics, !lyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Image(systemName: "text.quote")
                             .font(.system(size: 10, weight: .medium))

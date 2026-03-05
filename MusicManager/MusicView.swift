@@ -20,6 +20,10 @@ struct MusicView: View {
     @State private var existingPlaylists: [PlaylistModel] = []
     @State private var isFetchingPlaylists = false
     
+    @State private var isImporting = false
+    @State private var currentImportIndex = 0
+    @State private var totalImportCount = 0
+    
     
     @State private var showToast = false
     @State private var toastTitle = ""
@@ -77,10 +81,19 @@ struct MusicView: View {
                         showingMusicPicker = true
                     } label: {
                         HStack {
-                            Image(systemName: "plus")
-                                .font(.body.weight(.medium))
-                            Text("Add Songs")
-                                .font(.body.weight(.medium))
+                            if isImporting {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                    .tint(.white)
+                                    .padding(.trailing, 4)
+                                Text("Importing \(currentImportIndex)/\(totalImportCount)...")
+                                    .font(.body.weight(.medium))
+                            } else {
+                                Image(systemName: "plus")
+                                    .font(.body.weight(.medium))
+                                Text("Add Songs")
+                                    .font(.body.weight(.medium))
+                            }
                         }
                         .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
@@ -88,6 +101,7 @@ struct MusicView: View {
                         .background(Color.accentColor)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
+                    .disabled(isImporting)
                     
                     
                     Button {
@@ -295,9 +309,7 @@ struct MusicView: View {
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(100)
         }
-    } 
-    
-
+        }
         .sheet(isPresented: $showingMusicPicker) {
             DocumentPicker(types: Self.supportedAudioTypes, allowsMultiple: true) { urls in
                 handleMusicImport(urls: urls)
@@ -305,27 +317,10 @@ struct MusicView: View {
         }
         .sheet(item: $selectedSongForMatch) { item in
             if let index = songs.firstIndex(where: { $0.id == item.id }) {
-                // Determine source
-                let source = UserDefaults.standard.string(forKey: "metadataSource") ?? "local"
-                
-                // If "local" or legacy "custom", show Manual Editor
-                if source == "local" || source == "custom" {
-                    ManualMetadataEditor(song: $songs[index], isPresented: Binding(
-                        get: { selectedSongForMatch != nil },
-                        set: { if !$0 { selectedSongForMatch = nil } }
-                    ))
-                } else {
-                    // iTunes / Deezer show the search sheet
-                    iTunesSearchSheet(song: $songs[index], isPresented: Binding(
-                        get: { selectedSongForMatch != nil },
-                        set: { if !$0 { selectedSongForMatch = nil } }
-                    ))
-                }
-            } else {
-                VStack {
-                    Text("Error: Song not found")
-                    Button("Close") { selectedSongForMatch = nil }
-                }
+                ManualMetadataEditor(song: $songs[index], isPresented: Binding(
+                    get: { selectedSongForMatch != nil },
+                    set: { if !$0 { selectedSongForMatch = nil } }
+                ))
             }
         }
         .alert("Create Playlist", isPresented: $showPlaylistAlert) {
@@ -343,7 +338,6 @@ struct MusicView: View {
         .sheet(isPresented: $showingPlaylistSheet) {
             playlistSelectionSheet
         }
-
     }
     
     private var playlistSelectionSheet: some View {
@@ -464,72 +458,73 @@ struct MusicView: View {
         let documentsDirectory = URL.documentsDirectory
         
         Task {
-            var importedSongs: [SongMetadata] = []
-            
-            // Helper function to process a single file URL
-            func processFile(_ url: URL) async {
-                 // Skip non-audio files if we are scanning a folder, but DocumentPicker usually filters for us
-                 // However, when recursively scanning, we need to be careful.
-                 let ext = url.pathExtension.lowercased()
-                 if ["mp3", "wav", "aiff", "m4a", "flac"].contains(ext) {
-                     let destURL = documentsDirectory.appendingPathComponent(url.lastPathComponent)
-                     // Overwrite existing
-                     try? FileManager.default.removeItem(at: destURL)
-                     try? FileManager.default.copyItem(at: url, to: destURL)
-                     
-                     if var song = try? await SongMetadata.fromURL(destURL) {
-                         if useiTunes && autofetch {
-                             song = await SongMetadata.enrichWithiTunesMetadata(song)
-                         } else if metadataSource == "deezer" && autofetch {
-                             song = await SongMetadata.enrichWithDeezerMetadata(song)
-                         }
-                         
-                         // Fetch lyrics from LRCLIB if enabled and not already present
-                         let fetchLyrics = UserDefaults.standard.bool(forKey: "fetchLyrics")
-                         if fetchLyrics && (song.lyrics == nil || song.lyrics?.isEmpty == true) {
-                             if let fetchedLyrics = await SongMetadata.fetchLyricsFromLRCLIB(
-                                 title: song.title,
-                                 artist: song.artist,
-                                 album: song.album,
-                                 durationMs: song.durationMs
-                             ) {
-                                 song.lyrics = fetchedLyrics
-                             }
-                         }
-                         
-                         importedSongs.append(song)
-                     }
-                 }
-            }
+            // 1. Gather all actual file URLs
+            var allFileUrls: [URL] = []
             
             for url in urls {
-                Logger.shared.log("[MusicView] Processing input URL: \(url.path)")
-                
-                // Check if directory
                 var isDir: ObjCBool = false
                 if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-                    Logger.shared.log("[MusicView] URL is a directory. Scanning recursively...")
-                    // Recursive scan
-                    // Note: accessing security scoped resource for folder
-                    // Recursive scan
-                    // Note: accessing security scoped resource for folder
-                    // With asCopy: true, the folder is in our sandbox, so startAccessing might return false.
-                    // We attempt it, but proceed regardless.
                     let accessGranted = url.startAccessingSecurityScopedResource()
                     defer { if accessGranted { url.stopAccessingSecurityScopedResource() } }
                     
                     let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
-                    var fileCount = 0
                     while let fileURL = enumerator?.nextObject() as? URL {
-                        fileCount += 1
-                        if fileCount % 10 == 0 { Logger.shared.log("[MusicView] Scanned \(fileCount) files...") }
-                        await processFile(fileURL)
+                        allFileUrls.append(fileURL)
                     }
-                    Logger.shared.log("[MusicView] Finished scanning directory. Total files checked: \(fileCount)")
                 } else {
-                    // Single file
-                    Logger.shared.log("[MusicView] URL is a single file.")
-                    await processFile(url)
+                    allFileUrls.append(url)
+                }
+            }
+            
+            // 2. Set State
+            await MainActor.run {
+                self.isImporting = true
+                self.totalImportCount = allFileUrls.count
+                self.currentImportIndex = 0
+            }
+            
+            var importedSongs: [SongMetadata] = []
+            
+            // 3. Process
+            for fileURL in allFileUrls {
+                let ext = fileURL.pathExtension.lowercased()
+                if ["mp3", "wav", "aiff", "m4a", "flac"].contains(ext) {
+                    let destURL = documentsDirectory.appendingPathComponent(fileURL.lastPathComponent)
+                    try? FileManager.default.removeItem(at: destURL)
+                    try? FileManager.default.copyItem(at: fileURL, to: destURL)
+                    
+                    if var song = try? await SongMetadata.fromURL(destURL) {
+                        if metadataSource == "apple" && autofetch {
+                            song = await SongMetadata.enrichWithAppleMusicMetadata(song)
+                        } else if useiTunes && autofetch {
+                            song = await SongMetadata.enrichWithiTunesMetadata(song)
+                        } else if metadataSource == "deezer" && autofetch {
+                            song = await SongMetadata.enrichWithDeezerMetadata(song)
+                        } else if metadataSource == "local" && autofetch {
+                            // If user wants rich metadata even for local files
+                            if UserDefaults.standard.bool(forKey: "appleRichMetadata") {
+                                song = await SongMetadata.matchAppleMusicMetadata(song)
+                            }
+                        }
+                        
+                        let fetchLyrics = UserDefaults.standard.bool(forKey: "fetchLyrics")
+                        if fetchLyrics && (song.lyrics == nil || song.lyrics?.isEmpty == true) {
+                            if let fetchedLyrics = await SongMetadata.fetchLyricsFromLRCLIB(
+                                title: song.title,
+                                artist: song.artist,
+                                album: song.album,
+                                durationMs: song.durationMs
+                            ) {
+                                song.lyrics = fetchedLyrics
+                            }
+                        }
+                        
+                        importedSongs.append(song)
+                    }
+                }
+                
+                await MainActor.run {
+                    self.currentImportIndex += 1
                 }
             }
             
@@ -546,6 +541,8 @@ struct MusicView: View {
                     Logger.shared.log("[MusicView] No songs imported from selection")
                     self.showToast(title: "No songs found", icon: "exclamationmark.triangle")
                 }
+                
+                self.isImporting = false
             }
         }
     }
@@ -584,7 +581,10 @@ struct MusicView: View {
             }
         }
         
-        manager.injectSongs(songs: songs, progress: { progressText in
+        var lastProcessedIndex = 0
+        let songsToInfect = songs // Keep a copy for cleanup
+        
+        manager.injectSongs(songs: songsToInfect, progress: { progressText in
             DispatchQueue.main.async {
                 
                 if let range = progressText.range(of: #"(\d+)/\d+"#, options: .regularExpression),
@@ -592,6 +592,13 @@ struct MusicView: View {
                     self.currentInjectIndex = index
                     
                     self.injectProgress = CGFloat(index) / CGFloat(self.totalInjectCount) * 0.9
+                    
+                    // Remove songs from UI queue one-by-one as they get injected
+                    // We DON'T delete the file here yet because the upload might still be reading it!
+                    while lastProcessedIndex < index && !self.songs.isEmpty {
+                        _ = self.songs.removeFirst()
+                        lastProcessedIndex += 1
+                    }
                 }
             }
         }) { success in
@@ -607,9 +614,8 @@ struct MusicView: View {
                     self.injectProgress = 0
                     
                     if success {
-                        
-                        // Cleanup files after successful injection
-                        for song in self.songs {
+                        // Clean up all files from the original list
+                        for song in songsToInfect {
                             try? FileManager.default.removeItem(at: song.localURL)
                         }
                         
@@ -678,9 +684,22 @@ struct MusicView: View {
             }
         }
         
-        manager.injectSongsAsPlaylist(songs: songs, playlistName: name, targetPlaylistPid: pid, progress: { progressText in
+        var lastProcessedIndex = 0
+        let songsToInfect = songs // Keep a copy for cleanup
+        
+        manager.injectSongsAsPlaylist(songs: songsToInfect, playlistName: name, targetPlaylistPid: pid, progress: { progressText in
             DispatchQueue.main.async {
-                
+                if let range = progressText.range(of: #"(\d+)/\d+"#, options: .regularExpression),
+                   let index = Int(progressText[range].split(separator: "/").first ?? "") {
+                    self.currentInjectIndex = index
+                    self.injectProgress = CGFloat(index) / CGFloat(self.totalInjectCount) * 0.9
+                    
+                    // Remove from UI queue one-by-one
+                    while lastProcessedIndex < index && !self.songs.isEmpty {
+                        _ = self.songs.removeFirst()
+                        lastProcessedIndex += 1
+                    }
+                }
             }
         }) { success in
             DispatchQueue.main.async {
@@ -695,9 +714,8 @@ struct MusicView: View {
                     self.injectProgress = 0
                     
                     if success {
-                        
-                        // Cleanup files after successful playlist injection
-                        for song in self.songs {
+                        // Cleanup original songs list after successful playlist injection
+                        for song in songsToInfect {
                             try? FileManager.default.removeItem(at: song.localURL)
                         }
 
