@@ -19,7 +19,7 @@ To build ByeTunes yourself, you'll need a Mac with Xcode.
 ### Prerequisites
 
 1.  **Xcode**: Version 15+ recommended.
-2.  **iOS Device**: Running iOS 17.0 or later.
+2.  **iOS Device**: Running iOS 16.0 or later.
 
 ### External Libraries
 
