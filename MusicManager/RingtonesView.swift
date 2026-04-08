@@ -10,7 +10,7 @@ struct RingtoneMetadata: Identifiable {
     var fileSize: Int = 0
     var durationMs: Int = 30000
     
-    static func fromURL(_ url: URL) -> RingtoneMetadata {
+    static func fromURL(_ url: URL) async -> RingtoneMetadata {
         let name = url.deletingPathExtension().lastPathComponent
         
         let randomName = String((0..<4).map { _ in "ABCDEFGHIJKLMNOPQRSTUVWXYZ".randomElement()! })
@@ -20,7 +20,8 @@ struct RingtoneMetadata: Identifiable {
         let size = (attr?[.size] as? Int) ?? 0
         
         let asset = AVURLAsset(url: url)
-        let durationSeconds = CMTimeGetSeconds(asset.duration)
+        let duration = (try? await asset.load(.duration)) ?? .invalid
+        let durationSeconds = CMTimeGetSeconds(duration)
         let durationMs = durationSeconds.isNaN ? 30000 : Int(durationSeconds * 1000)
         
         return RingtoneMetadata(url: url, name: name, remoteFilename: remoteName, fileSize: size, durationMs: durationMs)
@@ -148,7 +149,7 @@ struct RingtonesView: View {
                  let finalURL = await convertToM4R(url)
                  
                  if let validURL = finalURL {
-                     let metadata = RingtoneMetadata.fromURL(validURL)
+                     let metadata = await RingtoneMetadata.fromURL(validURL)
                      await MainActor.run {
                          ringtones.append(metadata)
                      }
@@ -172,7 +173,8 @@ struct RingtonesView: View {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .m4a
         
-        let durationSeconds = CMTimeGetSeconds(asset.duration)
+        let duration = (try? await asset.load(.duration)) ?? .invalid
+        let durationSeconds = CMTimeGetSeconds(duration)
         let maxDuration = 30.0
         
         if durationSeconds > maxDuration {

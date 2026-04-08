@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
+    @Environment(\.openURL) private var openURL
     @ObservedObject var manager: DeviceManager
     @Binding var status: String
     
@@ -16,7 +17,15 @@ struct SettingsView: View {
     @State private var isSnapshotBusy = false
     @State private var isCreatingSnapshot = false
     @State private var isRestoringSnapshot = false
+    @State private var snapshotProgressTitle = "Working on Backup"
+    @State private var snapshotProgressMessage = "Preparing..."
+    @State private var snapshotProgress: Double? = nil
+    @State private var isFixingArtwork = false
+    @State private var artworkFixMessage = "Fixing artwork..."
+    @State private var artworkFixProgress: Double? = nil
     @State private var snapshots: [DeviceManager.DatabaseSnapshotInfo] = []
+    @State private var isCheckingForUpdate = false
+    @State private var settingsUpdate: AppUpdateInfo?
     
     @State private var showToast = false
     @State private var toastTitle = ""
@@ -25,9 +34,12 @@ struct SettingsView: View {
     @AppStorage("metadataSource") private var metadataSource = "local"
     @AppStorage("autofetchMetadata") private var autofetchMetadata = true
     @AppStorage("fetchLyrics") private var fetchLyrics = false
+    @AppStorage("appleSubscriptionLyrics") private var appleSubscriptionLyrics = false
     @AppStorage("storeRegion") private var storeRegion = "US"
     @AppStorage("appleRichMetadata") private var appleRichMetadata = true
     @AppStorage("keepDownloadedSongs") private var keepDownloadedSongs = false
+    @AppStorage("fullBackupSnapshots") private var fullBackupSnapshots = false
+    @AppStorage("downloadServer") private var downloadServer = DownloaderServerPreference.auto.rawValue
     
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -61,7 +73,7 @@ struct SettingsView: View {
                                     .frame(width: 28)
                                 
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Pairing File")
+                                    Text(manager.expectedPairingFileTitle)
                                         .font(.body)
                                         .foregroundColor(.primary)
                                     Text(manager.connectionStatus)
@@ -113,6 +125,8 @@ struct SettingsView: View {
                                         .clipShape(Capsule())
                                 }
                                 .padding(.leading, 8)
+                                .disabled(!manager.hasValidExpectedPairingFile)
+                                .opacity(manager.hasValidExpectedPairingFile ? 1 : 0.55)
                             }
                         }
                         .padding(.vertical, 14)
@@ -135,23 +149,43 @@ struct SettingsView: View {
                         .tracking(0.5)
                     
                     VStack(spacing: 0) {
-                        HStack {
-                            Image(systemName: "info.circle")
-                                .font(.body)
-                                .foregroundColor(.primary)
-                                .frame(width: 28)
-                            
-                            Text("Version")
-                                .font(.body)
-                            
-                            Spacer()
-                            
-                            Text("2.0")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
+                        Button {
+                            if let settingsUpdate {
+                                openURL(settingsUpdate.releaseURL)
+                            } else {
+                                checkForSettingsUpdate()
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "info.circle")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                    .frame(width: 28)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Version")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+
+                                    Text(settingsUpdate == nil ? "Tap to check for updates" : "Tap to download the latest release")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                
+                                Spacer()
+                                
+                                if isCheckingForUpdate {
+                                    ProgressView()
+                                } else {
+                                    Text(settingsUpdate.map { "Update \($0.version)" } ?? AppUpdateChecker.currentVersion)
+                                        .font(.subheadline)
+                                        .foregroundColor(settingsUpdate == nil ? .secondary : .accentColor)
+                                }
+                            }
                         }
                         .padding(.vertical, 14)
                         .padding(.horizontal, 16)
+                        .disabled(isCheckingForUpdate)
                         
                         Divider().padding(.leading, 56)
                         
@@ -283,19 +317,43 @@ struct SettingsView: View {
                             .padding(.horizontal, 16)
                         }
                         
+                        if !appleSubscriptionLyrics {
+                            Divider().padding(.leading, 56)
+                            
+                            Toggle(isOn: $fetchLyrics) {
+                                HStack {
+                                    Image(systemName: "quote.bubble.fill")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                        .frame(width: 28)
+                                    
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Fetch Lyrics")
+                                            .font(.body)
+                                        Text("Automatically fetch lyrics from LRCLIB, then Musixmatch, then NetEase")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                            .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 16)
+                        }
+
                         Divider().padding(.leading, 56)
-                        
-                        Toggle(isOn: $fetchLyrics) {
+
+                        Toggle(isOn: $appleSubscriptionLyrics) {
                             HStack {
-                                Image(systemName: "quote.bubble.fill")
+                                Image(systemName: "music.note.list")
                                     .font(.body)
                                     .foregroundColor(.primary)
                                     .frame(width: 28)
-                                
+
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Fetch Lyrics")
+                                    Text("Apple Music Subscription Lyrics")
                                         .font(.body)
-                                    Text("Automatically fetch lyrics from LRCLIB, then Musixmatch, then NetEase")
+                                    Text("Use synced Apple Music lyrics for subscribers (internet required).")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
@@ -344,6 +402,61 @@ struct SettingsView: View {
                     )
                 }
                 
+                if manager.supportsIOS26ArtworkRepair {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("IOS 26.4+")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.secondary)
+                            .tracking(0.5)
+
+                        VStack(spacing: 0) {
+                            Button {
+                                fixArtwork()
+                            } label: {
+                                HStack {
+                                    if isFixingArtwork {
+                                        ProgressView()
+                                            .frame(width: 28)
+                                    } else {
+                                        Image(systemName: "photo.on.rectangle.angled")
+                                            .font(.body)
+                                            .foregroundColor(.primary)
+                                            .frame(width: 28)
+                                    }
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(isFixingArtwork ? "Fixing Artwork..." : "Fix Artwork")
+                                            .font(.body)
+                                            .foregroundColor(.primary)
+                                        Text("Fix artwork and colors for songs added before iOS 26.4. Internet required.")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    if !isFixingArtwork {
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption)
+                                            .foregroundColor(Color(.systemGray3))
+                                    }
+                                }
+                                .padding(.vertical, 14)
+                                .padding(.horizontal, 16)
+                            }
+                            .disabled(isFixingArtwork || !manager.hasValidExpectedPairingFile)
+                            .opacity((isFixingArtwork || manager.hasValidExpectedPairingFile) ? 1 : 0.55)
+                        }
+                        .background(Color(.systemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color(.systemGray5), lineWidth: 1)
+                        )
+                    }
+                }
+
                 
                 VStack(alignment: .leading, spacing: 12) {
                     Text("DOWNLOADS")
@@ -353,6 +466,35 @@ struct SettingsView: View {
                         .tracking(0.5)
 
                     VStack(spacing: 0) {
+                        HStack {
+                            Image(systemName: "server.rack")
+                                .font(.body)
+                                .foregroundColor(.primary)
+                                .frame(width: 28)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Downloader Server")
+                                    .font(.body)
+                                Text("Choose the backend used for song downloads")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            Picker("Downloader Server", selection: $downloadServer) {
+                                ForEach(DownloaderServerPreference.allCases) { server in
+                                    Text(server.displayName).tag(server.rawValue)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                        }
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+
+                        Divider().padding(.leading, 56)
+
                         Toggle(isOn: $keepDownloadedSongs) {
                             HStack {
                                 Image(systemName: "square.and.arrow.down.on.square")
@@ -645,40 +787,6 @@ struct SettingsView: View {
                 
                 
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("DANGER ZONE")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.secondary)
-                        .tracking(0.5)
-                    
-                    Button {
-                        showingDeleteAlert = true
-                    } label: {
-                        HStack {
-                            Image(systemName: "trash.fill")
-                                .font(.body)
-                                .foregroundColor(.red)
-                                .frame(width: 28)
-                            
-                            Text("Delete Music Library")
-                                .font(.body)
-                                .foregroundColor(.red)
-                            
-                            Spacer()
-                        }
-                        .padding(.vertical, 14)
-                        .padding(.horizontal, 16)
-                        .background(Color(.systemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color(.systemGray5), lineWidth: 1)
-                        )
-                    }
-                }
-                
-                
-                VStack(alignment: .leading, spacing: 12) {
                     Text("BACKUP & RESTORE")
                         .font(.caption)
                         .fontWeight(.medium)
@@ -686,6 +794,29 @@ struct SettingsView: View {
                         .tracking(0.5)
                     
                     VStack(spacing: 0) {
+                        Toggle(isOn: $fullBackupSnapshots) {
+                            HStack {
+                                Image(systemName: "archivebox.fill")
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                    .frame(width: 28)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Full Backup")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                    Text("Back up the database and song files locally. This can take time and use a lot of space.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 16)
+
+                        Divider().padding(.leading, 56)
+
                         Button {
                             createSnapshotBackup()
                         } label: {
@@ -774,7 +905,7 @@ struct SettingsView: View {
                             .stroke(Color(.systemGray5), lineWidth: 1)
                     )
                     
-                    Text("Snapshot stores MediaLibrary DB files locally in app storage. Restore loads the latest snapshot.")
+                    Text(fullBackupSnapshots ? "Full backup stores a local copy of the database and media files. It can take time and use a lot of space." : "Database-only backup uses less space, but it cannot restore song files deleted by an external sync.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     
@@ -852,6 +983,39 @@ struct SettingsView: View {
                             .stroke(Color(.systemGray5), lineWidth: 1)
                     )
                 }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("DANGER ZONE")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .tracking(0.5)
+                    
+                    Button {
+                        showingDeleteAlert = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "trash.fill")
+                                .font(.body)
+                                .foregroundColor(.red)
+                                .frame(width: 28)
+                            
+                            Text("Delete Music Library")
+                                .font(.body)
+                                .foregroundColor(.red)
+                            
+                            Spacer()
+                        }
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 16)
+                        .background(Color(.systemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color(.systemGray5), lineWidth: 1)
+                        )
+                    }
+                }
                 
 
             }
@@ -893,6 +1057,16 @@ struct SettingsView: View {
         .onAppear {
             refreshSnapshots()
         }
+
+        if isFixingArtwork {
+            artworkFixPopup
+                .zIndex(90)
+        }
+
+        if isSnapshotBusy && (isCreatingSnapshot || isRestoringSnapshot) {
+            snapshotProgressPopup
+                .zIndex(95)
+        }
             
         if showToast {
             HStack(spacing: 12) {
@@ -918,6 +1092,120 @@ struct SettingsView: View {
         }
         } // ZStack
     } // body
+
+    private var artworkFixPopup: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.12))
+                        .frame(width: 58, height: 58)
+
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.system(size: 25, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                }
+
+                VStack(spacing: 6) {
+                    Text("Fixing Artwork")
+                        .font(.headline)
+                        .foregroundColor(.primary)
+
+                    Text("Hang tight, this could take some time.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                VStack(spacing: 10) {
+                    if let artworkFixProgress {
+                        ProgressView(value: artworkFixProgress)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                    }
+
+                    Text(artworkFixMessage)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 320)
+            .background(Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color(.systemGray5), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 8)
+            .padding(.horizontal, 28)
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+    }
+
+    private var snapshotProgressPopup: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.12))
+                        .frame(width: 58, height: 58)
+
+                    Image(systemName: isRestoringSnapshot ? "arrow.counterclockwise.circle.fill" : "externaldrive.badge.plus")
+                        .font(.system(size: 25, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                }
+
+                VStack(spacing: 6) {
+                    Text(snapshotProgressTitle)
+                        .font(.headline)
+                        .foregroundColor(.primary)
+
+                    Text(isCreatingSnapshot && fullBackupSnapshots ? "Hang tight, full backups can take some time." : "Hang tight, this could take some time.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                VStack(spacing: 10) {
+                    if let snapshotProgress {
+                        ProgressView(value: snapshotProgress)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                    }
+
+                    Text(snapshotProgressMessage)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 320)
+            .background(Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color(.systemGray5), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 8)
+            .padding(.horizontal, 28)
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+    }
 
     private func exportDatabase() {
         isExportingDb = true
@@ -966,10 +1254,16 @@ struct SettingsView: View {
         isSnapshotBusy = true
         isCreatingSnapshot = true
         isRestoringSnapshot = false
-        manager.createDatabaseSnapshot { success, message in
+        updateSnapshotProgress(title: fullBackupSnapshots ? "Creating Full Backup" : "Creating Backup", message: "Preparing backup...", progress: nil)
+        manager.createDatabaseSnapshot { message, progress in
+            DispatchQueue.main.async {
+                self.updateSnapshotProgress(title: self.fullBackupSnapshots ? "Creating Full Backup" : "Creating Backup", message: message, progress: progress)
+            }
+        } completion: { success, message in
             DispatchQueue.main.async {
                 self.isSnapshotBusy = false
                 self.isCreatingSnapshot = false
+                self.updateSnapshotProgress(title: self.fullBackupSnapshots ? "Creating Full Backup" : "Creating Backup", message: message, progress: success ? 1 : nil)
                 self.showToastMessage(
                     title: success ? message : "Backup Failed: \(message)",
                     icon: success ? "checkmark.circle.fill" : "xmark.circle.fill"
@@ -983,10 +1277,16 @@ struct SettingsView: View {
         isSnapshotBusy = true
         isCreatingSnapshot = false
         isRestoringSnapshot = true
-        manager.restoreLatestDatabaseSnapshot { success, message in
+        updateSnapshotProgress(title: "Restoring Backup", message: "Preparing restore...", progress: nil)
+        manager.restoreLatestDatabaseSnapshot { message, progress in
+            DispatchQueue.main.async {
+                self.updateSnapshotProgress(title: "Restoring Backup", message: message, progress: progress)
+            }
+        } completion: { success, message in
             DispatchQueue.main.async {
                 self.isSnapshotBusy = false
                 self.isRestoringSnapshot = false
+                self.updateSnapshotProgress(title: "Restoring Backup", message: message, progress: success ? 1 : nil)
                 self.showToastMessage(
                     title: success ? message : "Restore Failed: \(message)",
                     icon: success ? "arrow.counterclockwise.circle.fill" : "xmark.circle.fill"
@@ -1000,16 +1300,29 @@ struct SettingsView: View {
         isSnapshotBusy = true
         isCreatingSnapshot = false
         isRestoringSnapshot = true
-        manager.restoreDatabaseSnapshot(named: folderName) { success, message in
+        updateSnapshotProgress(title: "Restoring Backup", message: "Preparing restore...", progress: nil)
+        manager.restoreDatabaseSnapshot(named: folderName) { message, progress in
+            DispatchQueue.main.async {
+                self.updateSnapshotProgress(title: "Restoring Backup", message: message, progress: progress)
+            }
+        } completion: { success, message in
             DispatchQueue.main.async {
                 self.isSnapshotBusy = false
                 self.isRestoringSnapshot = false
+                self.updateSnapshotProgress(title: "Restoring Backup", message: message, progress: success ? 1 : nil)
                 self.showToastMessage(
                     title: success ? message : "Restore Failed: \(message)",
                     icon: success ? "arrow.counterclockwise.circle.fill" : "xmark.circle.fill"
                 )
             }
         }
+    }
+
+    private func updateSnapshotProgress(title: String, message: String, progress: Double?) {
+        snapshotProgressTitle = title
+        snapshotProgressMessage = message.isEmpty ? "Working..." : message
+        snapshotProgress = progress.map { min(max($0, 0), 1) }
+        status = snapshotProgressMessage
     }
     
     private func deleteSnapshot(named folderName: String) {
@@ -1034,6 +1347,72 @@ struct SettingsView: View {
                 self.snapshots = list
             }
         }
+    }
+
+    private func checkForSettingsUpdate() {
+        isCheckingForUpdate = true
+        Task {
+            do {
+                let update = try await AppUpdateChecker.checkForUpdate()
+                await MainActor.run {
+                    self.isCheckingForUpdate = false
+                    self.settingsUpdate = update
+                    if let update {
+                        self.showToastMessage(title: "ByeTunes \(update.version) is available", icon: "arrow.down.circle.fill")
+                    } else {
+                        self.showToastMessage(title: "ByeTunes is up to date", icon: "checkmark.circle.fill")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.isCheckingForUpdate = false
+                    self.showToastMessage(title: "Update Check Failed", icon: "xmark.circle.fill")
+                }
+                Logger.shared.log("[Update] Settings version check failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func fixArtwork() {
+        isFixingArtwork = true
+        updateArtworkFixProgress("Fixing artwork...")
+
+        manager.repairIOS26ArtworkColors { message in
+            DispatchQueue.main.async {
+                self.updateArtworkFixProgress(message)
+            }
+        } completion: { success, message in
+            DispatchQueue.main.async {
+                self.isFixingArtwork = false
+                self.updateArtworkFixProgress(message)
+                self.showToastMessage(
+                    title: success ? message : "Artwork Fix Failed: \(message)",
+                    icon: success ? "checkmark.circle.fill" : "xmark.circle.fill"
+                )
+            }
+        }
+    }
+
+    private func updateArtworkFixProgress(_ message: String) {
+        status = message
+        artworkFixMessage = message.isEmpty ? "Fixing artwork..." : message
+        artworkFixProgress = parsedArtworkFixProgress(from: message)
+    }
+
+    private func parsedArtworkFixProgress(from message: String) -> Double? {
+        guard let range = message.range(of: #"(\d+)/(\d+)"#, options: .regularExpression) else {
+            return nil
+        }
+
+        let parts = message[range].split(separator: "/")
+        guard parts.count == 2,
+              let current = Double(parts[0]),
+              let total = Double(parts[1]),
+              total > 0 else {
+            return nil
+        }
+
+        return min(max(current / total, 0), 1)
     }
     
     private func formatSnapshotDate(_ date: Date) -> String {
@@ -1063,26 +1442,13 @@ struct SettingsView: View {
     func handlePairingImport(url: URL?) {
         guard let url = url else { return }
         
-        let needsSecurityScope = url.startAccessingSecurityScopedResource()
-        defer {
-            if needsSecurityScope {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
-        
-        let destination = manager.pairingFile
-        
         do {
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
-            }
-            try FileManager.default.copyItem(at: url, to: destination)
-            
-            status = "Pairing file imported"
+            try manager.importPairingFile(from: url)
+            status = "\(manager.expectedPairingFileTitle) imported"
             
             manager.startHeartbeat()
         } catch {
-            status = "Import failed"
+            status = error.localizedDescription
         }
     }
 

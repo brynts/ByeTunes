@@ -71,7 +71,7 @@ struct OnboardingView: View {
                     
                     
                     VStack(alignment: .leading, spacing: 0) {
-                        StepRow(number: "1", text: "Export pairing file from computer", isLast: false)
+                        StepRow(number: "1", text: "Export \(manager.expectedPairingFileDescription) from computer", isLast: false)
                         StepRow(number: "2", text: "Transfer file to this iPhone", isLast: false)
                         StepRow(number: "3", text: "Connect to your Tunnel VPN", isLast: false)
                         StepRow(number: "4", text: "Tap button below to import", isLast: true)
@@ -100,7 +100,7 @@ struct OnboardingView: View {
                         } label: {
                             HStack {
                                 Image(systemName: "arrow.up.doc.fill")
-                                Text("Import Pairing File")
+                                Text("Import \(manager.expectedPairingFileTitle)")
                             }
                             .font(.headline)
                             .foregroundColor(.white)
@@ -168,29 +168,15 @@ struct OnboardingView: View {
         guard let url = url else { return }
         
         
-        let destination = manager.pairingFile
-        
         do {
-            let directory = destination.deletingLastPathComponent()
-            if !FileManager.default.fileExists(atPath: directory.path) {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            }
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
-            }
-            try FileManager.default.copyItem(at: url, to: destination)
-            
-            isConnecting = true
-            statusMessage = "Connecting..."
-            showError = false
-            
+            try manager.importPairingFile(from: url)
             isConnecting = true
             statusMessage = "Connecting..."
             showError = false
             
             manager.startHeartbeat()
         } catch {
-            statusMessage = "Import failed"
+            statusMessage = error.localizedDescription
             showError = true
         }
     }

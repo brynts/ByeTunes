@@ -728,6 +728,24 @@ struct BackendDownloadOutcome {
     let backendLabel: String
 }
 
+enum DownloaderServerPreference: String, CaseIterable, Identifiable {
+    case auto
+    case yoinkify
+    case hifiOne
+    case hifiTwo
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .auto: return "Auto"
+        case .yoinkify: return "Yoinkify"
+        case .hifiOne: return "HiFi One"
+        case .hifiTwo: return "HiFi Two"
+        }
+    }
+}
+
 enum DownloadPlatform: String {
     case appleMusic
     case spotify
@@ -747,11 +765,11 @@ enum DownloadPlatform: String {
 
     var backendGenreSource: String {
         switch self {
-        case .appleMusic: return "apple_music"
+        case .appleMusic: return "itunes"
         case .spotify: return "spotify"
-        case .deezer: return "deezer"
-        case .tidal: return "tidal"
-        case .unknown: return "unknown"
+        case .deezer: return "itunes"
+        case .tidal: return "itunes"
+        case .unknown: return "itunes"
         }
     }
 }
@@ -810,6 +828,24 @@ enum DownloadSupport {
         let id = tail.split(separator: "?").first?.split(separator: "/").first
         let value = id.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty ? nil : value
+    }
+
+    nonisolated static func normalizedSearchValue(_ value: String) -> String {
+        let folded = value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+        let cleaned = folded.replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+        return cleaned.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated static func artistTokens(from value: String) -> [String] {
+        let separatorsPattern = #"\s*(?:,|&| x | y | feat\.?|ft\.?|with)\s*"#
+        let canonicalized = value.replacingOccurrences(of: separatorsPattern, with: ",", options: .regularExpression)
+        return canonicalized
+            .components(separatedBy: ",")
+            .map(normalizedSearchValue)
+            .filter { !$0.isEmpty }
     }
 }
 
@@ -962,7 +998,7 @@ final class DownloadViewModel: ObservableObject {
         let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
 
         songResults = songs.map { item in
-            let songURL = "https://music.apple.com/\(region)/song/\(item.id)"
+            let songURL = item.attributes.url ?? "https://music.apple.com/\(region)/song/\(item.id)"
             return DownloadTrack(
                 id: item.id,
                 name: item.attributes.name,
@@ -1059,7 +1095,8 @@ final class DownloadViewModel: ObservableObject {
             song = await SongMetadata.enrichWithAppleMusicMetadata(song)
         }
 
-        if song.lyrics == nil || song.lyrics?.isEmpty == true {
+        let appleSubscriptionLyrics = UserDefaults.standard.bool(forKey: "appleSubscriptionLyrics")
+        if !appleSubscriptionLyrics && (song.lyrics == nil || song.lyrics?.isEmpty == true) {
             if let fetchedLyrics = await SongMetadata.fetchLyrics(
                 title: song.title,
                 artist: song.artist,
@@ -1088,23 +1125,30 @@ final class DownloadViewModel: ObservableObject {
     }
 
     private func downloadWithFallbacks(track: DownloadTrack) async throws -> BackendDownloadOutcome {
+        let serverPreference = DownloaderServerPreference(rawValue: UserDefaults.standard.string(forKey: "downloadServer") ?? "") ?? .auto
         let resolvedSource = try await preferredDownloadSource(for: track.sourceURL)
         log("Using primary source URL (\(resolvedSource.platform.displayName)): \(resolvedSource.url)")
 
-        let primaryCandidates = try primaryCandidates(for: resolvedSource)
-        do {
-            if let outcome = try await executeCandidatesUntilSuccess(
-                primaryCandidates,
-                suggestedName: "\(track.artistLine) - \(track.name)",
-                fallbackExtension: "flac"
-            ) {
-                return outcome
+        if serverPreference == .auto || serverPreference == .yoinkify {
+            let primaryCandidates = try primaryCandidates(for: resolvedSource)
+            do {
+                if let outcome = try await executeCandidatesUntilSuccess(
+                    primaryCandidates,
+                    trackID: track.id,
+                    suggestedName: "\(track.artistLine) - \(track.name)",
+                    fallbackExtension: "flac"
+                ) {
+                    return outcome
+                }
+            } catch {
+                log("Primary backend chain exhausted: \(error.localizedDescription)")
+                if serverPreference == .yoinkify {
+                    throw error
+                }
             }
-        } catch {
-            log("Primary backend chain exhausted: \(error.localizedDescription)")
         }
 
-        log("Yoinkify failed. Preparing Tidal fallback backends.")
+        log(serverPreference == .auto ? "Yoinkify failed. Preparing Tidal fallback backends." : "Preparing \(serverPreference.displayName) backend.")
 
         let mappedURL = try await fetchMappedURL(for: mappingSeedURL(for: track.sourceURL), platform: .tidal)
         log("Mapped Tidal URL: \(mappedURL)")
@@ -1113,16 +1157,44 @@ final class DownloadViewModel: ObservableObject {
             throw DownloadError.mappingFailed("Could not extract Tidal track ID.")
         }
 
-        let fallbackCandidates = tidalCandidates(trackID: trackID)
-        guard let outcome = try await executeCandidatesUntilSuccess(
-            fallbackCandidates,
-            suggestedName: "\(track.artistLine) - \(track.name)",
-            fallbackExtension: "flac"
-        ) else {
-            throw DownloadError.mappingFailed("All configured download backends failed.")
+        let initialTidalCandidates: [BackendCandidate]
+        if serverPreference == .auto {
+            initialTidalCandidates = tidalCandidates(trackID: trackID)
+        } else {
+            initialTidalCandidates = tidalCandidates(trackID: trackID, preference: serverPreference)
         }
 
-        return outcome
+        do {
+            if let outcome = try await executeCandidatesUntilSuccess(
+                initialTidalCandidates,
+                trackID: track.id,
+                suggestedName: "\(track.artistLine) - \(track.name)",
+                fallbackExtension: "flac"
+            ) {
+                return outcome
+            }
+        } catch {
+            log("Mapped Tidal candidate \(trackID) failed: \(error.localizedDescription)")
+        }
+
+        let candidateTrackIDs = await searchTidalCandidateTrackIDs(for: track, excluding: trackID)
+        for candidateTrackID in candidateTrackIDs {
+            log("Trying second-stage Tidal candidate: \(candidateTrackID)")
+            do {
+                if let outcome = try await executeCandidatesUntilSuccess(
+                    serverPreference == .auto ? tidalCandidates(trackID: candidateTrackID) : tidalCandidates(trackID: candidateTrackID, preference: serverPreference),
+                    trackID: track.id,
+                    suggestedName: "\(track.artistLine) - \(track.name)",
+                    fallbackExtension: "flac"
+                ) {
+                    return outcome
+                }
+            } catch {
+                log("Second-stage Tidal candidate \(candidateTrackID) failed: \(error.localizedDescription)")
+            }
+        }
+
+        throw DownloadError.mappingFailed("All configured download backends failed.")
     }
 
     private func preferredDownloadSource(for sourceURL: String) async throws -> DownloadSourceChoice {
@@ -1144,7 +1216,7 @@ final class DownloadViewModel: ObservableObject {
     private func primaryCandidates(for source: DownloadSourceChoice) throws -> [BackendCandidate] {
         var candidates: [BackendCandidate] = []
 
-        if let url = URL(string: "https://yoinkify.lol/api/download") {
+        if let url = URL(string: "https://yoinkify.com/api/download") {
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1168,8 +1240,20 @@ final class DownloadViewModel: ObservableObject {
         return backends.compactMap { makeRequest(label: $0.0, urlString: $0.1) }
     }
 
+    private func tidalCandidates(trackID: String, preference: DownloaderServerPreference) -> [BackendCandidate] {
+        switch preference {
+        case .hifiOne:
+            return makeRequest(label: "HiFi One", urlString: "https://hifi-one.spotisaver.net/track/?id=\(trackID)&quality=LOSSLESS").map { [$0] } ?? []
+        case .hifiTwo:
+            return makeRequest(label: "HiFi Two", urlString: "https://hifi-two.spotisaver.net/track/?id=\(trackID)&quality=LOSSLESS").map { [$0] } ?? []
+        case .auto, .yoinkify:
+            return tidalCandidates(trackID: trackID)
+        }
+    }
+
     private func executeCandidatesUntilSuccess(
         _ candidates: [BackendCandidate],
+        trackID: String,
         suggestedName: String,
         fallbackExtension: String
     ) async throws -> BackendDownloadOutcome? {
@@ -1183,6 +1267,7 @@ final class DownloadViewModel: ObservableObject {
             do {
                 let fileURL = try await executeDownloadRequest(
                     candidate.request,
+                    trackID: trackID,
                     suggestedName: suggestedName,
                     fallbackExtension: fallbackExtension
                 )
@@ -1199,6 +1284,7 @@ final class DownloadViewModel: ObservableObject {
 
     private func executeDownloadRequest(
         _ request: URLRequest,
+        trackID: String,
         suggestedName: String,
         fallbackExtension: String,
         depth: Int = 0
@@ -1220,6 +1306,7 @@ final class DownloadViewModel: ObservableObject {
             let redirectedRequest = URLRequest(url: manifestURL)
             return try await executeDownloadRequest(
                 redirectedRequest,
+                trackID: trackID,
                 suggestedName: suggestedName,
                 fallbackExtension: fallbackExtension,
                 depth: depth + 1
@@ -1231,6 +1318,7 @@ final class DownloadViewModel: ObservableObject {
             let redirectedRequest = URLRequest(url: redirectedURL)
             return try await executeDownloadRequest(
                 redirectedRequest,
+                trackID: trackID,
                 suggestedName: suggestedName,
                 fallbackExtension: fallbackExtension,
                 depth: depth + 1
@@ -1438,6 +1526,97 @@ final class DownloadViewModel: ObservableObject {
         return mapped
     }
 
+    private func searchTidalCandidateTrackIDs(for track: DownloadTrack, excluding excludedTrackID: String) async -> [String] {
+        var components = URLComponents(string: "https://hifi-one.spotisaver.net/search/")!
+        components.queryItems = [
+            URLQueryItem(name: "s", value: "\(track.name) \(track.artistLine)")
+        ]
+
+        guard let url = components.url else { return [] }
+
+        do {
+            let (data, response) = try await session.data(for: URLRequest(url: url))
+            try validateHTTP(response: response, data: data)
+
+            let decoded = try JSONDecoder().decode(TidalSearchResponse.self, from: data)
+            let rankedCandidates = decoded.data.items
+                .filter { String($0.id) != excludedTrackID }
+                .map { candidate in
+                    (candidate, scoreTidalCandidate(candidate, for: track))
+                }
+                .filter { $0.1 > 0 }
+                .sorted {
+                    if $0.1 == $1.1 {
+                        return $0.0.id < $1.0.id
+                    }
+                    return $0.1 > $1.1
+                }
+
+            let bestIDs = rankedCandidates.prefix(5).map { String($0.0.id) }
+            if !bestIDs.isEmpty {
+                log("Second-stage Tidal search candidates: \(bestIDs.joined(separator: ", "))")
+            }
+            return bestIDs
+        } catch {
+            log("Second-stage Tidal search failed: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    private func scoreTidalCandidate(_ candidate: TidalSearchItem, for track: DownloadTrack) -> Int {
+        let normalizedTrackTitle = DownloadSupport.normalizedSearchValue(track.name)
+        let normalizedAlbumName = DownloadSupport.normalizedSearchValue(track.albumName)
+        let candidateTitle = DownloadSupport.normalizedSearchValue(candidate.title)
+        let candidateCombinedTitle = DownloadSupport.normalizedSearchValue(
+            [candidate.title, candidate.version].compactMap { $0 }.joined(separator: " ")
+        )
+
+        var score = 0
+
+        if !normalizedTrackTitle.isEmpty {
+            if candidateCombinedTitle == normalizedTrackTitle {
+                score += 180
+            } else if candidateTitle == normalizedTrackTitle {
+                score += 150
+            } else if candidateCombinedTitle.contains(normalizedTrackTitle) || normalizedTrackTitle.contains(candidateCombinedTitle) {
+                score += 110
+            } else if candidateTitle.contains(normalizedTrackTitle) || normalizedTrackTitle.contains(candidateTitle) {
+                score += 80
+            }
+        }
+
+        let sourceArtistTokens = DownloadSupport.artistTokens(from: track.artistLine)
+        let candidateArtists = (candidate.artists?.map(\.name) ?? [candidate.artist?.name].compactMap { $0 })
+            .map(DownloadSupport.normalizedSearchValue)
+        for token in sourceArtistTokens {
+            if candidateArtists.contains(token) {
+                score += 45
+            } else if candidateArtists.contains(where: { $0.contains(token) || token.contains($0) }) {
+                score += 25
+            }
+        }
+
+        let candidateAlbumName = DownloadSupport.normalizedSearchValue(candidate.album?.title ?? "")
+        if !normalizedAlbumName.isEmpty, normalizedAlbumName != "unknown album" {
+            if candidateAlbumName == normalizedAlbumName {
+                score += 35
+            } else if candidateAlbumName.contains(normalizedAlbumName) || normalizedAlbumName.contains(candidateAlbumName) {
+                score += 20
+            }
+        }
+
+        if DownloadSupport.normalizedSearchValue(track.name).contains("remix"),
+           DownloadSupport.normalizedSearchValue(candidate.version ?? "").contains("remix") {
+            score += 20
+        }
+
+        if candidate.audioQuality?.uppercased().contains("LOSSLESS") == true {
+            score += 5
+        }
+
+        return score
+    }
+
     private func mappingSeedURL(for sourceURL: String) -> String {
         sourceURL
     }
@@ -1512,7 +1691,7 @@ final class DownloadViewModel: ObservableObject {
             }
 
             return tracks.map { item in
-                let songURL = "https://music.apple.com/\(region)/song/\(item.id)"
+                let songURL = item.attributes.url ?? "https://music.apple.com/\(region)/song/\(item.id)"
                 return DownloadTrack(
                     id: item.id,
                     name: item.attributes.name,
@@ -1906,6 +2085,33 @@ private struct AppleMusicAlbumTrackAttributes: Decodable {
     let name: String
     let artistName: String
     let albumName: String?
+    let url: String?
     let contentRating: String?
     let artwork: AppleMusicAPI.AppleMusicArtwork?
+}
+
+private struct TidalSearchResponse: Decodable {
+    let data: TidalSearchData
+}
+
+private struct TidalSearchData: Decodable {
+    let items: [TidalSearchItem]
+}
+
+private struct TidalSearchItem: Decodable {
+    let id: Int
+    let title: String
+    let version: String?
+    let audioQuality: String?
+    let artist: TidalSearchArtist?
+    let artists: [TidalSearchArtist]?
+    let album: TidalSearchAlbum?
+}
+
+private struct TidalSearchArtist: Decodable {
+    let name: String
+}
+
+private struct TidalSearchAlbum: Decodable {
+    let title: String
 }

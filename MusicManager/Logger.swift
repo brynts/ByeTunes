@@ -43,11 +43,18 @@ class Logger: ObservableObject {
     }
     
     func saveLogs() -> URL? {
-        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let filename = "MusicManager_Logs_\(timestamp).txt"
-        let fileURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(filename)
+        let fileManager = FileManager.default
+        let logsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs", isDirectory: true)
+        let fileURL = logsDirectory.appendingPathComponent("MusicManager_Logs.txt")
         
         do {
+            if !fileManager.fileExists(atPath: logsDirectory.path) {
+                try fileManager.createDirectory(at: logsDirectory, withIntermediateDirectories: true)
+            }
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try fileManager.removeItem(at: fileURL)
+            }
             try logs.write(to: fileURL, atomically: true, encoding: .utf8)
             return fileURL
         } catch {

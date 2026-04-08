@@ -1,6 +1,85 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct AppUpdateInfo: Identifiable, Equatable {
+    let id = UUID()
+    let version: String
+    let releaseURL: URL
+    let name: String
+}
+
+enum AppUpdateChecker {
+    static let currentVersion = "2.1"
+    static let releasesURL = URL(string: "https://github.com/EduAlexxis/ByeTunes/releases")!
+
+    private struct GitHubRelease: Decodable {
+        let tagName: String
+        let name: String?
+        let htmlURL: String
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case name
+            case htmlURL = "html_url"
+        }
+    }
+
+    static func checkForUpdate() async throws -> AppUpdateInfo? {
+        let url = URL(string: "https://api.github.com/repos/EduAlexxis/ByeTunes/releases/latest")!
+        var request = URLRequest(url: url)
+        request.setValue("ByeTunes/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw URLError(.badServerResponse)
+        }
+
+        let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        let latestVersion = normalizedVersion(release.tagName)
+        guard isVersion(latestVersion, newerThan: currentVersion),
+              let releaseURL = URL(string: release.htmlURL) else {
+            return nil
+        }
+
+        return AppUpdateInfo(
+            version: latestVersion,
+            releaseURL: releaseURL,
+            name: release.name ?? release.tagName
+        )
+    }
+
+    static func normalizedVersion(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+    }
+
+    static func isVersion(_ lhs: String, newerThan rhs: String) -> Bool {
+        let left = versionParts(lhs)
+        let right = versionParts(rhs)
+        let count = max(left.count, right.count)
+
+        for index in 0..<count {
+            let l = index < left.count ? left[index] : 0
+            let r = index < right.count ? right[index] : 0
+            if l != r {
+                return l > r
+            }
+        }
+        return false
+    }
+
+    private static func versionParts(_ value: String) -> [Int] {
+        normalizedVersion(value)
+            .split(separator: ".")
+            .map { part in
+                let digits = part.prefix { $0.isNumber }
+                return Int(digits) ?? 0
+            }
+    }
+}
+
 struct ContentView: View {
     @StateObject var manager = DeviceManager.shared
     @State private var status = "Ready"
@@ -11,6 +90,10 @@ struct ContentView: View {
     @State private var hasCompletedOnboarding = false
     @State private var showSplash = true
     @State private var showingLogViewer = false
+    @State private var showingRPPairingUpgradePicker = false
+    @State private var rpPairingUpgradeError: String?
+    @State private var availableUpdate: AppUpdateInfo?
+    @State private var dismissedUpdateVersion: String?
     
     // MARK: - iOS 26+ Version Check (GlassUI Support)
     private var isIOS26OrLater: Bool {
@@ -58,6 +141,35 @@ struct ContentView: View {
                     }
                 }
             }
+
+            if !showSplash && manager.needsRPPairingFileUpgrade {
+                RPPairingUpgradePrompt(
+                    errorMessage: rpPairingUpgradeError,
+                    importAction: {
+                        showingRPPairingUpgradePicker = true
+                    }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                .zIndex(2)
+            }
+
+            if !showSplash,
+               let availableUpdate,
+               dismissedUpdateVersion != availableUpdate.version {
+                AppUpdatePrompt(
+                    update: availableUpdate,
+                    dismissAction: {
+                        dismissedUpdateVersion = availableUpdate.version
+                    }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                .zIndex(3)
+            }
+        }
+        .sheet(isPresented: $showingRPPairingUpgradePicker) {
+            DocumentPicker(types: [.data, .xml, .propertyList, .item]) { url in
+                handleRPPairingUpgradeImport(url: url)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowLogViewer"))) { _ in
             showingLogViewer = true
@@ -78,19 +190,45 @@ struct ContentView: View {
                     showSplash = false
                 }
             }
-            
-            
-            if FileManager.default.fileExists(atPath: manager.pairingFile.path) {
-                hasCompletedOnboarding = true
+            manager.refreshExpectedPairingFileState()
+            hasCompletedOnboarding = manager.hasValidExpectedPairingFile || manager.needsRPPairingFileUpgrade
+            if manager.hasValidExpectedPairingFile {
                 manager.startHeartbeat()
             }
             
             
             checkPendingInjections()
+            checkForAppUpdate()
         }
         .onOpenURL { url in
             
             handleIncomingFile(url)
+        }
+    }
+
+    private func checkForAppUpdate() {
+        Task {
+            do {
+                let update = try await AppUpdateChecker.checkForUpdate()
+                await MainActor.run {
+                    availableUpdate = update
+                }
+            } catch {
+                Logger.shared.log("[Update] Version check failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func handleRPPairingUpgradeImport(url: URL?) {
+        guard let url else { return }
+
+        do {
+            try manager.importPairingFile(from: url)
+            rpPairingUpgradeError = nil
+            hasCompletedOnboarding = true
+            manager.startHeartbeat()
+        } catch {
+            rpPairingUpgradeError = error.localizedDescription
         }
     }
 
@@ -134,14 +272,15 @@ struct ContentView: View {
             try FileManager.default.copyItem(at: url, to: destURL)
             
             if ext == "m4r" {
-                
-                let ringtone = RingtoneMetadata.fromURL(destURL)
-                ringtones.append(ringtone)
-                selectedTab = 1 
-                Logger.shared.log("[ContentView] Added ringtone: \(ringtone.name)")
-                
-                
-                autoInjectRingtones([ringtone])
+                Task {
+                    let ringtone = await RingtoneMetadata.fromURL(destURL)
+                    await MainActor.run {
+                        ringtones.append(ringtone)
+                        selectedTab = 1
+                        Logger.shared.log("[ContentView] Added ringtone: \(ringtone.name)")
+                        autoInjectRingtones([ringtone])
+                    }
+                }
             } else if ["mp3", "m4a", "wav", "flac", "aiff"].contains(ext) {
                 
                 Task {
@@ -263,7 +402,7 @@ struct ContentView: View {
                 
                 if ext == "m4r" {
                     
-                    let ringtone = RingtoneMetadata.fromURL(fileURL)
+                    let ringtone = await RingtoneMetadata.fromURL(fileURL)
                     await MainActor.run {
                         ringtones.append(ringtone)
                         selectedTab = 1 
@@ -282,6 +421,142 @@ struct ContentView: View {
     }
 }
 
+
+private struct RPPairingUpgradePrompt: View {
+    let errorMessage: String?
+    let importAction: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+
+            VStack(spacing: 20) {
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.12))
+                        .frame(width: 72, height: 72)
+
+                    Image(systemName: "lock.shield.fill")
+                        .font(.system(size: 32, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                }
+
+                VStack(spacing: 8) {
+                    Text("RP Pairing File Required")
+                        .font(.system(size: 24, weight: .bold))
+                        .multilineTextAlignment(.center)
+
+                    Text("iOS 26.4 or newer needs an RP Pairing File before ByeTunes can connect. Import the new file to continue.")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.footnote)
+                        .foregroundColor(.red)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity)
+                        .background(Color.red.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+
+                Button(action: importAction) {
+                    HStack {
+                        Image(systemName: "arrow.up.doc.fill")
+                        Text("Import RP Pairing File")
+                    }
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 15)
+                    .background(Color.accentColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+
+                Text("This message will stay here until the RP Pairing File is imported.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(24)
+            .frame(maxWidth: 360)
+            .background(Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 24))
+            .shadow(color: .black.opacity(0.18), radius: 28, x: 0, y: 16)
+            .padding(.horizontal, 24)
+        }
+    }
+}
+
+private struct AppUpdatePrompt: View {
+    let update: AppUpdateInfo
+    let dismissAction: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+
+            VStack(spacing: 20) {
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.12))
+                        .frame(width: 72, height: 72)
+
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 32, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                }
+
+                VStack(spacing: 8) {
+                    Text("Update Available")
+                        .font(.system(size: 24, weight: .bold))
+                        .multilineTextAlignment(.center)
+
+                    Text("ByeTunes \(update.version) is available. Download the latest release from GitHub when you are ready.")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Link(destination: update.releaseURL) {
+                    HStack {
+                        Image(systemName: "arrow.up.right.square.fill")
+                        Text("Open Releases")
+                    }
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 15)
+                    .background(Color.accentColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+
+                Button(action: dismissAction) {
+                    Text("Later")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 360)
+            .background(Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 24))
+            .shadow(color: .black.opacity(0.18), radius: 28, x: 0, y: 16)
+            .padding(.horizontal, 24)
+        }
+    }
+}
 
 
 struct FloatingTabBar: View {

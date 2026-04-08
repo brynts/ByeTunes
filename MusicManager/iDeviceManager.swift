@@ -20,13 +20,28 @@ typealias AdapterHandle = OpaquePointer
 typealias ReadWriteOpaqueHandle = OpaquePointer
 typealias RsdHandshakeHandle = OpaquePointer
 typealias AppServiceHandle = OpaquePointer
+typealias RpPairingFileHandle = OpaquePointer
 
 typealias IdeviceErrorCode = UnsafeMutablePointer<IdeviceFfiError>?
+typealias SnapshotProgressHandler = (String, Double?) -> Void
 
 let IdeviceSuccess: IdeviceErrorCode = nil
 
+enum PairingFileImportError: LocalizedError {
+    case invalidFileType(expected: String)
 
-private let BUILD_VERSION = "v2.0"
+    var errorDescription: String? {
+        switch self {
+        case .invalidFileType(let expected):
+            return "That file is not a valid \(expected)."
+        }
+    }
+}
+
+
+private let BUILD_VERSION = "v2.1"
+private let DEVICE_HOST = "10.7.0.1"
+private let RP_PAIRING_PORT: UInt16 = 49152
 
 class DeviceManager: ObservableObject {
     struct DatabaseSnapshotInfo: Identifiable {
@@ -35,17 +50,57 @@ class DeviceManager: ObservableObject {
         let createdAt: Date
         let songCount: Int
     }
+
+    struct ExportableSongInfo: Identifiable, Hashable {
+        var id: String { remoteFilename }
+        let remoteFilename: String
+        let title: String
+        let artist: String
+        let album: String
+        let fileExtension: String
+
+        var suggestedFilename: String {
+            let ext = fileExtension.isEmpty ? "mp3" : fileExtension
+            return "\(DeviceManager.sanitizedExportFilenameBase("\(artist) - \(title)")).\(ext)"
+        }
+    }
+
+    private struct ArtworkRepairCandidate {
+        let itemPid: Int64
+        let albumPid: Int64
+        let storeItemId: Int64
+        let artworkToken: String
+        let relativePath: String
+    }
+
     @Published var heartbeatReady: Bool = false
     @Published var connectionStatus: String = "Disconnected"
+    @Published private(set) var hasValidExpectedPairingFile: Bool = false
     var provider: IdeviceProviderHandle?
+    var rpAdapter: AdapterHandle?
+    var rpHandshake: RsdHandshakeHandle?
     var heartbeatThread: Thread?
     
     static var shared = DeviceManager()
     
     
     static let appGroupID = "group.com.edualexxis.MusicManager"
+
+    private static func sanitizedExportFilenameBase(_ value: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>:")
+        let cleaned = value
+            .components(separatedBy: invalid)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let collapsed = cleaned.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return collapsed.isEmpty ? "Exported Song" : collapsed
+    }
     
     var pairingFile: URL {
+        regularPairingFile
+    }
+
+    var regularPairingFile: URL {
         let base: URL
         if let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroupID) {
             base = containerURL
@@ -54,20 +109,65 @@ class DeviceManager: ObservableObject {
         }
         return base.appendingPathComponent("pairing file").appendingPathComponent("pairingFile.plist")
     }
+
+    var rpPairingFile: URL {
+        regularPairingFile.deletingLastPathComponent().appendingPathComponent("rpPairingFile.plist")
+    }
+
+    private var expectedPairingFile: URL {
+        requiresRPPairingTunnel ? rpPairingFile : regularPairingFile
+    }
     
     
     static var sharedContainerURL: URL? {
         return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
     }
+
+    private var requiresRPPairingTunnel: Bool {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        if version.majorVersion > 26 { return true }
+        return version.majorVersion == 26 && version.minorVersion >= 4
+    }
+
+    private var connectionModeDescription: String {
+        requiresRPPairingTunnel ? "RPPairing tunnel" : "lockdown pairing file"
+    }
+
+    var expectedPairingFileDescription: String {
+        requiresRPPairingTunnel ? "RP pairing file" : "pairing file"
+    }
+
+    var expectedPairingFileTitle: String {
+        requiresRPPairingTunnel ? "RP Pairing File" : "Pairing File"
+    }
+
+    var needsRPPairingFileUpgrade: Bool {
+        requiresRPPairingTunnel && !hasValidExpectedPairingFile
+    }
+
+    var supportsIOS26ArtworkRepair: Bool {
+        requiresRPPairingTunnel
+    }
+
+    private var hasActiveTransport: Bool {
+        if requiresRPPairingTunnel {
+            return rpAdapter != nil && rpHandshake != nil
+        }
+        return provider != nil
+    }
     
     private var snapshotsDirectoryURL: URL {
         let base = Self.sharedContainerURL ?? URL.documentsDirectory
-        return base.appendingPathComponent("db_snapshots", isDirectory: true)
+        let hidden = base.appendingPathComponent(".db_snapshots", isDirectory: true)
+        let legacy = base.appendingPathComponent("db_snapshots", isDirectory: true)
+        migrateLegacySnapshotsDirectory(from: legacy, to: hidden)
+        return hidden
     }
     
     private let snapshotMusicManifestName = "music_files.txt"
     private let snapshotArtworkManifestName = "artwork_paths.txt"
     private let snapshotArtworkDirectory = "Artwork/Originals"
+    private let snapshotFullBackupDirectory = ".iTunesFullBackup"
     
     private init() {
         Logger.shared.log("===========================================")
@@ -79,7 +179,7 @@ class DeviceManager: ObservableObject {
         defer { free(cString) }
         idevice_init_logger(Info, Disabled, cString)
         
-        let folderPath = self.pairingFile.deletingLastPathComponent()
+        let folderPath = self.regularPairingFile.deletingLastPathComponent()
         do {
             if !FileManager.default.fileExists(atPath: folderPath.path) {
                 try FileManager.default.createDirectory(at: folderPath, withIntermediateDirectories: true)
@@ -88,18 +188,228 @@ class DeviceManager: ObservableObject {
         } catch {
             Logger.shared.log("[DeviceManager] Error creating pairing directory: \(error)")
         }
+        refreshExpectedPairingFileState()
     }
+
+    private func migrateLegacySnapshotsDirectory(from legacy: URL, to hidden: URL) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: legacy.path) else { return }
+
+        do {
+            if !fm.fileExists(atPath: hidden.path) {
+                try fm.moveItem(at: legacy, to: hidden)
+                Logger.shared.log("[Backup] Migrated snapshots folder to hidden storage")
+                return
+            }
+
+            let entries = try fm.contentsOfDirectory(at: legacy, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            for entry in entries {
+                let destination = hidden.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+                if fm.fileExists(atPath: destination.path) {
+                    try? fm.removeItem(at: destination)
+                }
+                try fm.moveItem(at: entry, to: destination)
+            }
+            try fm.removeItem(at: legacy)
+            Logger.shared.log("[Backup] Merged legacy snapshots into hidden storage")
+        } catch {
+            Logger.shared.log("[Backup] Failed to migrate legacy snapshots folder: \(error)")
+        }
+    }
+
     
-    
+    private func resetConnectionHandles() {
+        if let oldProvider = provider {
+            idevice_provider_free(oldProvider)
+            provider = nil
+        }
+        if let oldHandshake = rpHandshake {
+            rsd_handshake_free(oldHandshake)
+            rpHandshake = nil
+        }
+        if let oldAdapter = rpAdapter {
+            adapter_close(oldAdapter)
+            adapter_free(oldAdapter)
+            rpAdapter = nil
+        }
+    }
+
+    private func makeSocketAddress(port: UInt16) -> sockaddr_in {
+        var addr = sockaddr_in()
+        memset(&addr, 0, MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = CFSwapInt16HostToBig(port)
+        inet_pton(AF_INET, DEVICE_HOST, &addr.sin_addr)
+        return addr
+    }
+
+    func refreshExpectedPairingFileState() {
+        hasValidExpectedPairingFile = validateExpectedPairingFile()
+    }
+
+    func importPairingFile(from url: URL) throws {
+        let needsSecurityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if needsSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let directory = expectedPairingFile.deletingLastPathComponent()
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        if FileManager.default.fileExists(atPath: expectedPairingFile.path) {
+            try FileManager.default.removeItem(at: expectedPairingFile)
+        }
+        try FileManager.default.copyItem(at: url, to: expectedPairingFile)
+
+        refreshExpectedPairingFileState()
+        guard hasValidExpectedPairingFile else {
+            try? FileManager.default.removeItem(at: expectedPairingFile)
+            refreshExpectedPairingFileState()
+            throw PairingFileImportError.invalidFileType(expected: expectedPairingFileTitle)
+        }
+    }
+
+    private func validateExpectedPairingFile() -> Bool {
+        let file = expectedPairingFile
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            return false
+        }
+
+        if requiresRPPairingTunnel {
+            var rpPairingPtr: RpPairingFileHandle?
+            let readErr = rp_pairing_file_read(file.path, &rpPairingPtr)
+            guard readErr == IdeviceSuccess, let rpPairingHandle = rpPairingPtr else {
+                return false
+            }
+            rp_pairing_file_free(rpPairingHandle)
+            return true
+        }
+
+        var pairingPtr: IdevicePairingFile?
+        let readErr = idevice_pairing_file_read(file.path, &pairingPtr)
+        guard readErr == IdeviceSuccess, let pairingHandle = pairingPtr else {
+            return false
+        }
+        idevice_pairing_file_free(pairingHandle)
+        return true
+    }
+
+    @discardableResult
+    private func connectHeartbeatClient(_ client: inout HeartbeatClientHandle?) -> IdeviceErrorCode {
+        if requiresRPPairingTunnel, let rpAdapter, let rpHandshake {
+            return heartbeat_connect_rsd(rpAdapter, rpHandshake, &client)
+        }
+        return heartbeat_connect(provider, &client)
+    }
+
+    @discardableResult
+    private func connectLockdownClient(_ client: inout LockdowndClientHandle?) -> IdeviceErrorCode {
+        if requiresRPPairingTunnel, let rpAdapter, let rpHandshake {
+            return lockdownd_connect_rsd(rpAdapter, rpHandshake, &client)
+        }
+        return lockdownd_connect(provider, &client)
+    }
+
+    @discardableResult
+    private func connectNotificationProxyClient(_ client: inout NotificationProxyClientHandle?) -> IdeviceErrorCode {
+        if requiresRPPairingTunnel, let rpAdapter, let rpHandshake {
+            return notification_proxy_connect_rsd(rpAdapter, rpHandshake, &client)
+        }
+        return notification_proxy_connect(provider, &client)
+    }
+
+    @discardableResult
+    private func connectAfcClient(_ client: inout AfcClientHandle?) -> IdeviceErrorCode {
+        if requiresRPPairingTunnel, let rpAdapter, let rpHandshake {
+            var lastError: IdeviceErrorCode = IdeviceSuccess
+            for attempt in 0..<10 {
+                lastError = afc_client_connect_rsd(rpAdapter, rpHandshake, &client)
+                if lastError == IdeviceSuccess && client != nil {
+                    return lastError
+                }
+                if attempt < 9 {
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+            }
+            return lastError
+        }
+        return afc_client_connect(provider, &client)
+    }
+
+    private func establishRPPairingTunnel() -> Bool {
+        var rpPairingPtr: RpPairingFileHandle?
+        let readErr = rp_pairing_file_read(rpPairingFile.path, &rpPairingPtr)
+        guard readErr == IdeviceSuccess, let rpPairingHandle = rpPairingPtr else {
+            Logger.shared.log("[DeviceManager] ERROR: Failed to read RPPairing file. Err: \(String(describing: readErr))")
+            return false
+        }
+        defer { rp_pairing_file_free(rpPairingHandle) }
+
+        var addr = makeSocketAddress(port: RP_PAIRING_PORT)
+        let addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let tunnelErr = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                tunnel_create_rppairing(
+                    sockaddrPointer,
+                    addrLen,
+                    "Music-Provider",
+                    rpPairingHandle,
+                    nil,
+                    nil,
+                    &rpAdapter,
+                    &rpHandshake
+                )
+            }
+        }
+
+        guard tunnelErr == IdeviceSuccess, rpAdapter != nil, rpHandshake != nil else {
+            Logger.shared.log("[DeviceManager] ERROR: RPPairing tunnel failed. Err: \(String(describing: tunnelErr))")
+            resetConnectionHandles()
+            return false
+        }
+
+        Logger.shared.log("[DeviceManager] RPPairing tunnel established via \(DEVICE_HOST):\(RP_PAIRING_PORT)")
+        return true
+    }
+
     
     func startHeartbeat(completion: ((Bool) -> Void)? = nil) {
+        refreshExpectedPairingFileState()
+        guard hasValidExpectedPairingFile else {
+            let message = "Invalid \(expectedPairingFileTitle)"
+            Logger.shared.log("[DeviceManager] \(message). Import the correct file before connecting.")
+            DispatchQueue.main.async {
+                self.connectionStatus = message
+                self.heartbeatReady = false
+                completion?(false)
+            }
+            return
+        }
+
+        if heartbeatReady && hasActiveTransport {
+            DispatchQueue.main.async {
+                completion?(true)
+            }
+            return
+        }
+
+        if Thread.isMainThread {
+            self.connectionStatus = "Connecting..."
+            self.heartbeatReady = false
+        } else {
+            DispatchQueue.main.sync {
+                self.connectionStatus = "Connecting..."
+                self.heartbeatReady = false
+            }
+        }
+
+        resetConnectionHandles()
         
         
         heartbeatThread = Thread {
-            DispatchQueue.main.async {
-                self.connectionStatus = "Connecting..."
-            }
-            
             self.establishHeartbeat { success in
                 DispatchQueue.main.async {
                     if success {
@@ -121,7 +431,7 @@ class DeviceManager: ObservableObject {
             DispatchQueue.global().async {
                 
                 for _ in 0..<20 {
-                    if self.heartbeatReady {
+                    if self.heartbeatReady && self.hasActiveTransport {
                         DispatchQueue.main.async { completion(true) }
                         return
                     }
@@ -133,35 +443,40 @@ class DeviceManager: ObservableObject {
     }
 
     func establishHeartbeat(_ completion: @escaping (Bool) -> Void) {
-                 
-        var addr = sockaddr_in()
-        memset(&addr, 0, MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = CFSwapInt16HostToBig(UInt16(LOCKDOWN_PORT))
-        inet_pton(AF_INET, "10.7.0.1", &addr.sin_addr)
-        
-        var pairingPtr: IdevicePairingFile?
-        let _ = idevice_pairing_file_read(pairingFile.path, &pairingPtr)
-        
-        if let oldProvider = provider {
-            idevice_provider_free(oldProvider)
-            provider = nil
-        }
-        
-        let providerErr = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                idevice_tcp_provider_new(sockaddrPointer, pairingPtr, "Music-Provider", &provider)
+        resetConnectionHandles()
+        Logger.shared.log("[DeviceManager] Establishing \(connectionModeDescription) connection...")
+
+        if requiresRPPairingTunnel {
+            guard establishRPPairingTunnel() else {
+                completion(false)
+                return
+            }
+        } else {
+            var addr = makeSocketAddress(port: UInt16(LOCKDOWN_PORT))
+
+            var pairingPtr: IdevicePairingFile?
+            let pairingErr = idevice_pairing_file_read(regularPairingFile.path, &pairingPtr)
+            guard pairingErr == IdeviceSuccess, pairingPtr != nil else {
+                Logger.shared.log("[DeviceManager] ERROR: Failed to read pairing file. Err: \(String(describing: pairingErr))")
+                completion(false)
+                return
+            }
+
+            let providerErr = withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                    idevice_tcp_provider_new(sockaddrPointer, pairingPtr, "Music-Provider", &provider)
+                }
+            }
+
+            if provider == nil {
+                Logger.shared.log("[DeviceManager] ERROR: Provider is nil. Err: \(String(describing: providerErr))")
+                completion(false)
+                return
             }
         }
-        
-        if provider == nil {
-            Logger.shared.log("[DeviceManager] ERROR: Provider is nil. Err: \(String(describing: providerErr))")
-            completion(false)
-            return
-        }
-        
+
         var hbClient: HeartbeatClientHandle?
-        let err = heartbeat_connect(provider, &hbClient)
+        let err = connectHeartbeatClient(&hbClient)
         
         if err == IdeviceSuccess && hbClient != nil {
             Logger.shared.log("[DeviceManager] Heartbeat connected successfully!")
@@ -204,7 +519,7 @@ class DeviceManager: ObservableObject {
     
     func sendSyncFinishedNotification() {
         var lockdownd: LockdowndClientHandle?
-        let err = lockdownd_connect(provider, &lockdownd)
+        let err = connectLockdownClient(&lockdownd)
         
         if err == IdeviceSuccess {
             var port: UInt16 = 0
@@ -216,7 +531,7 @@ class DeviceManager: ObservableObject {
 
     private func postRingtoneRefreshNotifications() {
         var npClient: NotificationProxyClientHandle?
-        let npErr = notification_proxy_connect(provider, &npClient)
+        let npErr = connectNotificationProxyClient(&npClient)
         guard npErr == IdeviceSuccess, let npClient else {
             Logger.shared.log("[RingtoneNotify] Failed to connect notification_proxy")
             return
@@ -254,7 +569,7 @@ class DeviceManager: ObservableObject {
         inet_pton(AF_INET, "10.7.0.1", &addr.sin_addr)
 
         var pairingPtr: IdevicePairingFile?
-        _ = idevice_pairing_file_read(pairingFile.path, &pairingPtr)
+        _ = idevice_pairing_file_read(regularPairingFile.path, &pairingPtr)
         guard pairingPtr != nil else { return nil }
 
         var temporaryProvider: IdeviceProviderHandle?
@@ -281,7 +596,79 @@ class DeviceManager: ObservableObject {
     }
 
     @discardableResult
+    private func terminateMusicApp(adapter: AdapterHandle, handshake: RsdHandshakeHandle) -> Bool {
+        var appService: AppServiceHandle?
+        let appErr = app_service_connect_rsd(adapter, handshake, &appService)
+        guard appErr == IdeviceSuccess, let appServiceHandle = appService else {
+            Logger.shared.log("[MusicKill] Failed to connect AppService")
+            return false
+        }
+        defer { app_service_free(appServiceHandle) }
+
+        var processes: UnsafeMutablePointer<ProcessTokenC>?
+        var processCount: UInt = 0
+        let listErr = app_service_list_processes(appServiceHandle, &processes, &processCount)
+        guard listErr == IdeviceSuccess, let processList = processes, processCount > 0 else {
+            Logger.shared.log("[MusicKill] No process list available")
+            return false
+        }
+        defer { app_service_free_process_list(processList, processCount) }
+
+        var terminatedAny = false
+        for i in 0..<Int(processCount) {
+            let token = processList[i]
+            guard token.pid != 0 else { continue }
+            let exe = token.executable_url.map { String(cString: $0) } ?? ""
+
+            if exe.localizedCaseInsensitiveContains("MusicManager") {
+                continue
+            }
+
+            let isAppleMusicProcess =
+                exe.localizedCaseInsensitiveContains("MobileMusicPlayer")
+                || exe.localizedCaseInsensitiveContains("/Music.app/Music")
+                || exe.localizedCaseInsensitiveContains("/Applications/Music.app/")
+
+            guard isAppleMusicProcess else { continue }
+
+            Logger.shared.log("[MusicKill] Targeting Apple Music pid=\(token.pid) exe=\(exe)")
+
+            var signalResp: UnsafeMutablePointer<SignalResponseC>?
+            let termErr = app_service_send_signal(appServiceHandle, token.pid, 15, &signalResp)
+            if signalResp != nil {
+                app_service_free_signal_response(signalResp)
+            }
+            if termErr == IdeviceSuccess {
+                terminatedAny = true
+                Logger.shared.log("[MusicKill] Sent SIGTERM to pid=\(token.pid)")
+            }
+
+            Thread.sleep(forTimeInterval: 0.25)
+
+            var killResp: UnsafeMutablePointer<SignalResponseC>?
+            let killErr = app_service_send_signal(appServiceHandle, token.pid, 9, &killResp)
+            if killResp != nil {
+                app_service_free_signal_response(killResp)
+            }
+            if killErr == IdeviceSuccess {
+                terminatedAny = true
+                Logger.shared.log("[MusicKill] Sent SIGKILL to pid=\(token.pid)")
+            }
+        }
+
+        return terminatedAny
+    }
+
+    @discardableResult
     private func terminateMusicAppIfRunning() -> Bool {
+        if requiresRPPairingTunnel {
+            guard let rpAdapter, let rpHandshake else {
+                Logger.shared.log("[MusicKill] RPPairing tunnel unavailable")
+                return false
+            }
+            return terminateMusicApp(adapter: rpAdapter, handshake: rpHandshake)
+        }
+
         return withTemporaryProvider(label: "Music-Kill") { refreshProvider in
             guard let refreshProvider else { return false }
 
@@ -322,66 +709,7 @@ class DeviceManager: ObservableObject {
             }
             defer { rsd_handshake_free(handshakeHandle) }
 
-            var appService: AppServiceHandle?
-            let appErr = app_service_connect_rsd(adapterHandle, handshakeHandle, &appService)
-            guard appErr == IdeviceSuccess, let appServiceHandle = appService else {
-                Logger.shared.log("[MusicKill] Failed to connect AppService")
-                return false
-            }
-            defer { app_service_free(appServiceHandle) }
-
-            var processes: UnsafeMutablePointer<ProcessTokenC>?
-            var processCount: UInt = 0
-            let listErr = app_service_list_processes(appServiceHandle, &processes, &processCount)
-            guard listErr == IdeviceSuccess, let processList = processes, processCount > 0 else {
-                Logger.shared.log("[MusicKill] No process list available")
-                return false
-            }
-            defer { app_service_free_process_list(processList, processCount) }
-
-            var terminatedAny = false
-            for i in 0..<Int(processCount) {
-                let token = processList[i]
-                guard token.pid != 0 else { continue }
-                let exe = token.executable_url.map { String(cString: $0) } ?? ""
-
-                if exe.localizedCaseInsensitiveContains("MusicManager") {
-                    continue
-                }
-
-                let isAppleMusicProcess =
-                    exe.localizedCaseInsensitiveContains("MobileMusicPlayer")
-                    || exe.localizedCaseInsensitiveContains("/Music.app/Music")
-                    || exe.localizedCaseInsensitiveContains("/Applications/Music.app/")
-
-                guard isAppleMusicProcess else { continue }
-
-                Logger.shared.log("[MusicKill] Targeting Apple Music pid=\(token.pid) exe=\(exe)")
-
-                var signalResp: UnsafeMutablePointer<SignalResponseC>?
-                let termErr = app_service_send_signal(appServiceHandle, token.pid, 15, &signalResp)
-                if signalResp != nil {
-                    app_service_free_signal_response(signalResp)
-                }
-                if termErr == IdeviceSuccess {
-                    terminatedAny = true
-                    Logger.shared.log("[MusicKill] Sent SIGTERM to pid=\(token.pid)")
-                }
-
-                Thread.sleep(forTimeInterval: 0.25)
-
-                var killResp: UnsafeMutablePointer<SignalResponseC>?
-                let killErr = app_service_send_signal(appServiceHandle, token.pid, 9, &killResp)
-                if killResp != nil {
-                    app_service_free_signal_response(killResp)
-                }
-                if killErr == IdeviceSuccess {
-                    terminatedAny = true
-                    Logger.shared.log("[MusicKill] Sent SIGKILL to pid=\(token.pid)")
-                }
-            }
-
-            return terminatedAny
+            return terminateMusicApp(adapter: adapterHandle, handshake: handshakeHandle)
         }
     }
     
@@ -390,7 +718,7 @@ class DeviceManager: ObservableObject {
     
     func getDeviceProductVersion() -> String? {
         var lockdownd: LockdowndClientHandle?
-        let err = lockdownd_connect(provider, &lockdownd)
+        let err = connectLockdownClient(&lockdownd)
         
         guard err == IdeviceSuccess, let client = lockdownd else {
             return nil
@@ -426,14 +754,16 @@ class DeviceManager: ObservableObject {
         Logger.shared.log("[DeviceManager] Detected device version: \(versionString)")
         let components = versionString.split(separator: ".").compactMap { Int($0) }
         guard let major = components.first else { return .ios(16) }
+        let minor = components.count > 1 ? components[1] : 0
+        let patch = components.count > 2 ? components[2] : 0
         
-        return .ios(major)
+        return .ios(major, minor: minor, patch: patch)
     }
 
     func triggerATCSync(completion: @escaping (Bool) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             var lockdownd: LockdowndClientHandle?
-            let err = lockdownd_connect(self.provider, &lockdownd)
+            let err = self.connectLockdownClient(&lockdownd)
             
             guard err == IdeviceSuccess else {
                 Logger.shared.log("[DeviceManager] Failed to connect lockdownd for ATC")
@@ -478,7 +808,7 @@ class DeviceManager: ObservableObject {
             Logger.shared.log("[DeviceManager] File exists: \(FileManager.default.fileExists(atPath: localURL.path))")
 
             Logger.shared.log("[DeviceManager] Connecting AFC client...")
-            afc_client_connect(self.provider, &afc)
+            self.connectAfcClient(&afc)
             Logger.shared.log("[DeviceManager] AFC client connected: \(afc != nil)")
             
             guard afc != nil else {
@@ -536,7 +866,7 @@ class DeviceManager: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             var afc: AfcClientHandle?
             
-            afc_client_connect(self.provider, &afc)
+            self.connectAfcClient(&afc)
             
             guard afc != nil else {
                 Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for deletion")
@@ -565,7 +895,7 @@ class DeviceManager: ObservableObject {
             }
 
             var afc: AfcClientHandle?
-            let connectErr = afc_client_connect(self.provider, &afc)
+            let connectErr = self.connectAfcClient(&afc)
             
             guard afc != nil else {
                 Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for library reset (Error: \(String(describing: connectErr)))")
@@ -599,10 +929,12 @@ class DeviceManager: ObservableObject {
         }
     }
     
-    func createDatabaseSnapshot(completion: @escaping (Bool, String) -> Void) {
+    func createDatabaseSnapshot(progress: SnapshotProgressHandler? = nil, completion: @escaping (Bool, String) -> Void) {
         Logger.shared.log("[Backup] Creating database snapshot...")
         
         DispatchQueue.global(qos: .userInitiated).async {
+            progress?("Preparing backup...", nil)
+            let fullBackupEnabled = UserDefaults.standard.bool(forKey: "fullBackupSnapshots")
             if self.killMusicBeforeInjectEnabled {
                 let killed = self.terminateMusicAppIfRunning()
                 Logger.shared.log("[Backup] Pre-snapshot Music kill \(killed ? "completed" : "skipped/failed")")
@@ -641,7 +973,8 @@ class DeviceManager: ObservableObject {
             ]
             
             var saved: [String] = []
-            for item in files {
+            for (index, item) in files.enumerated() {
+                progress?("Backing up database files \(index + 1)/\(files.count)...", Double(index + 1) / Double(files.count) * 0.25)
                 let localURL = folder.appendingPathComponent(item.local)
                 let sem = DispatchSemaphore(value: 0)
                 var success = false
@@ -670,50 +1003,73 @@ class DeviceManager: ObservableObject {
             }
             
             let dbLocal = folder.appendingPathComponent("MediaLibrary.sqlitedb")
+            progress?("Indexing music files...", fullBackupEnabled ? 0.28 : 0.45)
             let musicFiles = Array(self.musicFilenamesFromDatabase(dbLocal)).sorted()
             self.writeSnapshotManifest(musicFiles, to: folder.appendingPathComponent(self.snapshotMusicManifestName))
             Logger.shared.log("[Backup] Indexed \(musicFiles.count) music filenames for rollback safety")
             
+            progress?("Indexing artwork...", fullBackupEnabled ? 0.32 : 0.55)
             let artworkPaths = self.artworkPathsFromDatabase(dbLocal)
             self.writeSnapshotManifest(artworkPaths, to: folder.appendingPathComponent(self.snapshotArtworkManifestName))
             Logger.shared.log("[Backup] Indexed \(artworkPaths.count) artwork paths")
             
-            let artworkRoot = folder.appendingPathComponent(self.snapshotArtworkDirectory, isDirectory: true)
-            var artworkSaved = 0
-            if !artworkPaths.isEmpty {
-                try? FileManager.default.createDirectory(at: artworkRoot, withIntermediateDirectories: true)
-                for relativePath in artworkPaths {
-                    let localURL = artworkRoot.appendingPathComponent(relativePath)
-                    let localDir = localURL.deletingLastPathComponent()
-                    try? FileManager.default.createDirectory(at: localDir, withIntermediateDirectories: true)
-                    
-                    let remotePath = "/iTunes_Control/iTunes/Artwork/Originals/\(relativePath)"
-                    let sem = DispatchSemaphore(value: 0)
-                    var downloaded = false
-                    self.downloadFileFromDevice(remotePath: remotePath, localURL: localURL) { ok in
-                        downloaded = ok
-                        sem.signal()
-                    }
-                    sem.wait()
-                    
-                    if downloaded {
-                        artworkSaved += 1
-                    } else {
-                        try? FileManager.default.removeItem(at: localURL)
+            if fullBackupEnabled {
+                Logger.shared.log("[Backup] Separate artwork backup skipped for full backup")
+            } else {
+                let artworkRoot = folder.appendingPathComponent(self.snapshotArtworkDirectory, isDirectory: true)
+                var artworkSaved = 0
+                if !artworkPaths.isEmpty {
+                    try? FileManager.default.createDirectory(at: artworkRoot, withIntermediateDirectories: true)
+                    for (index, relativePath) in artworkPaths.enumerated() {
+                        progress?("Backing up artwork \(index + 1)/\(artworkPaths.count)...", 0.58 + (Double(index + 1) / Double(artworkPaths.count) * 0.34))
+                        let localURL = artworkRoot.appendingPathComponent(relativePath)
+                        let localDir = localURL.deletingLastPathComponent()
+                        try? FileManager.default.createDirectory(at: localDir, withIntermediateDirectories: true)
+                        
+                        let remotePath = "/iTunes_Control/iTunes/Artwork/Originals/\(relativePath)"
+                        let sem = DispatchSemaphore(value: 0)
+                        var downloaded = false
+                        self.downloadFileFromDevice(remotePath: remotePath, localURL: localURL) { ok in
+                            downloaded = ok
+                            sem.signal()
+                        }
+                        sem.wait()
+                        
+                        if downloaded {
+                            artworkSaved += 1
+                        } else {
+                            try? FileManager.default.removeItem(at: localURL)
+                        }
                     }
                 }
+                Logger.shared.log("[Backup] Artwork saved: \(artworkSaved)/\(artworkPaths.count)")
             }
-            Logger.shared.log("[Backup] Artwork saved: \(artworkSaved)/\(artworkPaths.count)")
+
+            if fullBackupEnabled {
+                progress?("Scanning full iTunes folder...", 0.38)
+                Logger.shared.log("[Backup] Full backup enabled, copying iTunes/Music folders...")
+                let fullResult = self.createFullITunesBackupCopy(in: folder) { message, value in
+                    progress?(message, value)
+                }
+                guard fullResult.success else {
+                    Logger.shared.log("[Backup] Full backup failed: \(fullResult.message)")
+                    completion(false, fullResult.message)
+                    return
+                }
+                Logger.shared.log("[Backup] Full backup copy created: \(fullResult.message)")
+            }
             
+            progress?("Backup complete.", 1)
             Logger.shared.log("[Backup] Snapshot complete: \(folder.lastPathComponent) (\(saved.count) files)")
-            completion(true, "Snapshot created: \(folder.lastPathComponent)")
+            completion(true, fullBackupEnabled ? "Full snapshot created: \(folder.lastPathComponent)" : "Snapshot created: \(folder.lastPathComponent)")
         }
     }
     
-    func restoreLatestDatabaseSnapshot(completion: @escaping (Bool, String) -> Void) {
+    func restoreLatestDatabaseSnapshot(progress: SnapshotProgressHandler? = nil, completion: @escaping (Bool, String) -> Void) {
         Logger.shared.log("[Backup] Restoring latest database snapshot...")
         
         DispatchQueue.global(qos: .userInitiated).async {
+            progress?("Finding latest backup...", nil)
             let root = self.snapshotsDirectoryURL
             let fm = FileManager.default
             
@@ -738,11 +1094,11 @@ class DeviceManager: ObservableObject {
                 completion(false, "No snapshots found")
                 return
             }
-            self.restoreSnapshotDirectory(latest, completion: completion)
+            self.restoreSnapshotDirectory(latest, progress: progress, completion: completion)
         }
     }
     
-    func restoreDatabaseSnapshot(named folderName: String, completion: @escaping (Bool, String) -> Void) {
+    func restoreDatabaseSnapshot(named folderName: String, progress: SnapshotProgressHandler? = nil, completion: @escaping (Bool, String) -> Void) {
         Logger.shared.log("[Backup] Restoring snapshot: \(folderName)")
         
         DispatchQueue.global(qos: .userInitiated).async {
@@ -751,7 +1107,7 @@ class DeviceManager: ObservableObject {
                 completion(false, "Snapshot not found")
                 return
             }
-            self.restoreSnapshotDirectory(snapshotDir, completion: completion)
+            self.restoreSnapshotDirectory(snapshotDir, progress: progress, completion: completion)
         }
     }
     
@@ -769,9 +1125,17 @@ class DeviceManager: ObservableObject {
         }
     }
     
-    private func restoreSnapshotDirectory(_ snapshotDir: URL, completion: @escaping (Bool, String) -> Void) {
+    private func restoreSnapshotDirectory(_ snapshotDir: URL, progress: SnapshotProgressHandler? = nil, completion: @escaping (Bool, String) -> Void) {
+        progress?("Preparing restore...", nil)
         let fm = FileManager.default
         let dbLocal = snapshotDir.appendingPathComponent("MediaLibrary.sqlitedb")
+        let fullBackupRoot = snapshotDir.appendingPathComponent(snapshotFullBackupDirectory, isDirectory: true)
+
+        if fm.fileExists(atPath: fullBackupRoot.path) {
+            restoreFullITunesBackupCopy(fullBackupRoot, progress: progress, completion: completion)
+            return
+        }
+
         guard fm.fileExists(atPath: dbLocal.path) else {
             completion(false, "Snapshot missing MediaLibrary.sqlitedb")
             return
@@ -783,7 +1147,7 @@ class DeviceManager: ObservableObject {
         }
         
         var afc: AfcClientHandle?
-        afc_client_connect(self.provider, &afc)
+        self.connectAfcClient(&afc)
         guard let afc else {
             completion(false, "AFC connection failed")
             return
@@ -796,6 +1160,7 @@ class DeviceManager: ObservableObject {
         let walPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal"
         let ringtonePath = "/iTunes_Control/Ringtones/Ringtones.plist"
         
+        progress?("Uploading database...", 0.25)
         _ = afc_make_directory(afc, "/iTunes_Control/iTunes")
         _ = afc_make_directory(afc, "/iTunes_Control/Ringtones")
         
@@ -812,6 +1177,7 @@ class DeviceManager: ObservableObject {
             return
         }
         
+        progress?("Swapping database...", 0.55)
         _ = afc_remove_path(afc, shmPath)
         _ = afc_remove_path(afc, walPath)
         _ = afc_remove_path(afc, finalDBPath)
@@ -826,6 +1192,7 @@ class DeviceManager: ObservableObject {
         
         let ringtoneLocal = snapshotDir.appendingPathComponent("Ringtones.plist")
         if fm.fileExists(atPath: ringtoneLocal.path) {
+            progress?("Restoring ringtones...", 0.65)
             let semRingtone = DispatchSemaphore(value: 0)
             self.uploadFileToDevice(localURL: ringtoneLocal, remotePath: ringtonePath) { _ in
                 semRingtone.signal()
@@ -847,6 +1214,7 @@ class DeviceManager: ObservableObject {
                     let relative = fileURL.path.replacingOccurrences(of: artworkRoot.path + "/", with: "")
                     guard !relative.isEmpty else { continue }
                     
+                    progress?("Restoring artwork \(restoredArtwork + 1)...", nil)
                     let remote = "/iTunes_Control/iTunes/Artwork/Originals/\(relative)"
                     let semArt = DispatchSemaphore(value: 0)
                     self.uploadFileToDevice(localURL: fileURL, remotePath: remote) { ok in
@@ -861,11 +1229,266 @@ class DeviceManager: ObservableObject {
         }
         Logger.shared.log("[Backup] Restored artwork files: \(restoredArtwork)")
         
+        progress?("Restore complete.", 1)
         self.sendSyncFinishedNotification()
         Logger.shared.log("[Backup] Restore complete from \(snapshotDir.lastPathComponent)")
         completion(true, "Restored: \(snapshotDir.lastPathComponent)")
     }
-    
+
+    private func createFullITunesBackupCopy(in snapshotDir: URL, progress: SnapshotProgressHandler? = nil) -> (success: Bool, message: String) {
+        let fm = FileManager.default
+        let backupRoot = snapshotDir.appendingPathComponent(snapshotFullBackupDirectory, isDirectory: true)
+
+        try? fm.removeItem(at: backupRoot)
+
+        do {
+            try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
+        } catch {
+            return (false, "Failed creating full backup folder")
+        }
+
+        var afc: AfcClientHandle?
+        self.connectAfcClient(&afc)
+        guard let afc else {
+            try? fm.removeItem(at: backupRoot)
+            return (false, "AFC unavailable for full backup")
+        }
+        defer { afc_client_free(afc) }
+
+        let roots = [
+            "/iTunes_Control/iTunes",
+            "/iTunes_Control/Music",
+            "/iTunes_Control/Ringtones"
+        ]
+
+        var remoteFiles: [String] = []
+        for remoteRoot in roots {
+            remoteFiles.append(contentsOf: listRemoteFilesForBackup(afc: afc, remotePath: remoteRoot))
+        }
+
+        guard !remoteFiles.isEmpty else {
+            try? fm.removeItem(at: backupRoot)
+            return (false, "No files found for full backup")
+        }
+
+        var copied = 0
+        for (index, remotePath) in remoteFiles.enumerated() {
+            progress?("Copying full backup files \(index + 1)/\(remoteFiles.count)...", 0.48 + (Double(index + 1) / Double(remoteFiles.count) * 0.48))
+            let relative = remotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let localURL = backupRoot.appendingPathComponent(relative)
+            copied += copyRemoteFileToLocal(afc: afc, remotePath: remotePath, localURL: localURL)
+        }
+
+        guard copied > 0 else {
+            try? fm.removeItem(at: backupRoot)
+            return (false, "No files found for full backup")
+        }
+
+        progress?("Full backup copy saved.", 0.98)
+        let size = directorySize(backupRoot)
+        return (true, "Full backup saved (\(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)))")
+    }
+
+    private func restoreFullITunesBackupCopy(_ backupRoot: URL, progress: SnapshotProgressHandler? = nil, completion: @escaping (Bool, String) -> Void) {
+        Logger.shared.log("[Backup] Restoring full backup copy...")
+        progress?("Preparing full backup restore...", 0.12)
+
+        if self.killMusicBeforeInjectEnabled {
+            let killed = self.terminateMusicAppIfRunning()
+            Logger.shared.log("[Backup] Pre-full-restore Music kill \(killed ? "completed" : "skipped/failed")")
+        }
+
+        var afc: AfcClientHandle?
+        self.connectAfcClient(&afc)
+        guard let afc else {
+            completion(false, "AFC unavailable for full restore")
+            return
+        }
+        defer { afc_client_free(afc) }
+
+        progress?("Clearing device iTunes folders...", 0.28)
+        for path in ["/iTunes_Control/iTunes", "/iTunes_Control/Music", "/iTunes_Control/Ringtones"] {
+            _ = afc_remove_path_and_contents(afc, path)
+        }
+        _ = afc_make_directory(afc, "/iTunes_Control")
+
+        let localITunesControl = backupRoot.appendingPathComponent("iTunes_Control", isDirectory: true)
+        let filesToRestore = localFilesForBackupRestore(under: localITunesControl)
+        let restored = uploadLocalTreeToRemote(
+            afc: afc,
+            localURL: localITunesControl,
+            remotePath: "/iTunes_Control",
+            progress: { uploaded, _ in
+                let total = max(filesToRestore.count, 1)
+                progress?("Restoring full backup files \(min(uploaded, total))/\(total)...", 0.34 + (Double(min(uploaded, total)) / Double(total) * 0.58))
+            }
+        )
+
+        guard restored > 0 else {
+            completion(false, "No files restored from full backup")
+            return
+        }
+
+        self.sendSyncFinishedNotification()
+        progress?("Full restore complete.", 1)
+        Logger.shared.log("[Backup] Full restore complete, restored \(restored) files")
+        completion(true, "Full snapshot restored. Restart Music if it is still cached.")
+    }
+
+    private func listRemoteFilesForBackup(afc: AfcClientHandle, remotePath: String) -> [String] {
+        var info = AfcFileInfo()
+        let infoErr = afc_get_file_info(afc, remotePath, &info)
+        guard infoErr == nil else {
+            return []
+        }
+        defer { afc_file_info_free(&info) }
+
+        let type = info.st_ifmt.map { String(cString: $0) } ?? ""
+        guard type == "S_IFDIR" else {
+            return [remotePath]
+        }
+
+        var entries: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+        var count: Int = 0
+        let listErr = afc_list_directory(afc, remotePath, &entries, &count)
+        guard listErr == nil, let entries else {
+            return []
+        }
+        defer { free(entries) }
+
+        var files: [String] = []
+        for index in 0..<count {
+            guard let ptr = entries[index] else { continue }
+            let name = String(cString: ptr)
+            guard name != "." && name != ".." else { continue }
+            files.append(contentsOf: listRemoteFilesForBackup(afc: afc, remotePath: "\(remotePath)/\(name)"))
+        }
+        return files
+    }
+
+    private func copyRemoteFileToLocal(afc: AfcClientHandle, remotePath: String, localURL: URL) -> Int {
+        let fm = FileManager.default
+
+        var file: AfcFileHandle?
+        afc_file_open(afc, remotePath, AfcRdOnly, &file)
+        guard let file else {
+            return 0
+        }
+        defer { afc_file_close(file) }
+
+        var dataPtr: UnsafeMutablePointer<UInt8>?
+        var length: Int = 0
+        let readErr = afc_file_read_entire(file, &dataPtr, &length)
+        guard readErr == nil, let dataPtr, length > 0 else {
+            return 0
+        }
+        defer { afc_file_read_data_free(dataPtr, length) }
+
+        do {
+            try fm.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(bytes: dataPtr, count: length).write(to: localURL)
+            return 1
+        } catch {
+            Logger.shared.log("[Backup] Failed saving \(remotePath): \(error)")
+            return 0
+        }
+    }
+
+    private func uploadLocalTreeToRemote(afc: AfcClientHandle, localURL: URL, remotePath: String, progress: ((Int, String) -> Void)? = nil) -> Int {
+        var uploadedCount = 0
+        return uploadLocalTreeToRemote(afc: afc, localURL: localURL, remotePath: remotePath, progress: progress, uploadedCount: &uploadedCount)
+    }
+
+    private func uploadLocalTreeToRemote(afc: AfcClientHandle, localURL: URL, remotePath: String, progress: ((Int, String) -> Void)?, uploadedCount: inout Int) -> Int {
+        let fm = FileManager.default
+        guard let values = try? localURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey]) else {
+            return 0
+        }
+
+        if values.isDirectory == true {
+            _ = afc_make_directory(afc, remotePath)
+            guard let entries = try? fm.contentsOfDirectory(at: localURL, includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey], options: [.skipsHiddenFiles]) else {
+                return 0
+            }
+
+            var uploaded = 0
+            for entry in entries {
+                uploaded += uploadLocalTreeToRemote(
+                    afc: afc,
+                    localURL: entry,
+                    remotePath: "\(remotePath)/\(entry.lastPathComponent)",
+                    progress: progress,
+                    uploadedCount: &uploadedCount
+                )
+            }
+            return uploaded
+        }
+
+        guard values.isRegularFile == true,
+              let data = try? Data(contentsOf: localURL) else {
+            return 0
+        }
+
+        _ = afc_make_directory(afc, (remotePath as NSString).deletingLastPathComponent)
+        _ = afc_remove_path(afc, remotePath)
+
+        var file: AfcFileHandle?
+        afc_file_open(afc, remotePath, AfcWrOnly, &file)
+        guard let file else {
+            return 0
+        }
+        defer { afc_file_close(file) }
+
+        data.withUnsafeBytes { buffer in
+            if let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                afc_file_write(file, base, data.count)
+            }
+        }
+
+        uploadedCount += 1
+        progress?(uploadedCount, remotePath)
+        return 1
+    }
+
+    private func localFilesForBackupRestore(under root: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var files: [URL] = []
+        for case let fileURL as URL in enumerator {
+            let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey])
+            if values?.isRegularFile == true {
+                files.append(fileURL)
+            }
+        }
+        return files
+    }
+
+    private func directorySize(_ root: URL) -> Int {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+
+        var total = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true else {
+                continue
+            }
+            total += values.fileSize ?? 0
+        }
+        return total
+    }
+
     private func countSongsInSnapshotDB(_ dbURL: URL) -> Int {
         var db: OpaquePointer?
         guard sqlite3_open(dbURL.path, &db) == SQLITE_OK else { return 0 }
@@ -1385,7 +2008,7 @@ class DeviceManager: ObservableObject {
         }
         
         var afc: AfcClientHandle?
-        afc_client_connect(self.provider, &afc)
+        self.connectAfcClient(&afc)
         guard let afc else {
             Logger.shared.log("[Backup] Merge failed: AFC unavailable for swap")
             return false
@@ -1559,7 +2182,7 @@ class DeviceManager: ObservableObject {
         }
         
         var afc: AfcClientHandle?
-        afc_client_connect(self.provider, &afc)
+        self.connectAfcClient(&afc)
         guard let afc else { return false }
         defer { afc_client_free(afc) }
         
@@ -1610,6 +2233,184 @@ class DeviceManager: ObservableObject {
             
             snapshots.sort { $0.createdAt > $1.createdAt }
             completion(snapshots)
+        }
+    }
+
+    func fetchExportableSongs(completion: @escaping ([ExportableSongInfo]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fileManager = FileManager.default
+            let tempDir = fileManager.temporaryDirectory.appendingPathComponent("song_export_probe_\(UUID().uuidString)", isDirectory: true)
+
+            defer { try? fileManager.removeItem(at: tempDir) }
+
+            do {
+                try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            } catch {
+                Logger.shared.log("[Export] Failed to create staging directory: \(error)")
+                completion([])
+                return
+            }
+
+            let semDb = DispatchSemaphore(value: 0)
+            var dbData: Data?
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { data in
+                dbData = data
+                semDb.signal()
+            }
+            semDb.wait()
+
+            guard let dbData, dbData.count > 10000 else {
+                Logger.shared.log("[Export] Failed to load MediaLibrary.sqlitedb for song export list")
+                completion([])
+                return
+            }
+
+            let semWal = DispatchSemaphore(value: 0)
+            var walData: Data?
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal") { data in
+                walData = data
+                semWal.signal()
+            }
+            semWal.wait()
+
+            let semShm = DispatchSemaphore(value: 0)
+            var shmData: Data?
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm") { data in
+                shmData = data
+                semShm.signal()
+            }
+            semShm.wait()
+
+            let stagedDbURL = tempDir.appendingPathComponent("MediaLibrary.sqlitedb")
+            do {
+                try dbData.write(to: stagedDbURL)
+                if let walData {
+                    try walData.write(to: tempDir.appendingPathComponent("MediaLibrary.sqlitedb-wal"))
+                }
+                if let shmData {
+                    try shmData.write(to: tempDir.appendingPathComponent("MediaLibrary.sqlitedb-shm"))
+                }
+            } catch {
+                Logger.shared.log("[Export] Failed to stage export database files: \(error)")
+                completion([])
+                return
+            }
+
+            var onDeviceFiles = Set<String>()
+            let musicDir = self.resolvePrimaryMusicDirectory()
+            let semFiles = DispatchSemaphore(value: 0)
+            self.listFiles(remotePath: musicDir) { files in
+                if let files {
+                    onDeviceFiles = Set(files)
+                }
+                semFiles.signal()
+            }
+            semFiles.wait()
+
+            let metadataMap = self.carrySongMetadataMapFromDatabase(stagedDbURL)
+            let songs = self.musicFilenamesFromDatabase(stagedDbURL)
+                .filter { onDeviceFiles.contains($0) }
+                .map { filename -> ExportableSongInfo in
+                    let meta = metadataMap[filename]
+                    let fallbackTitle = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+                    return ExportableSongInfo(
+                        remoteFilename: filename,
+                        title: meta?.title ?? fallbackTitle,
+                        artist: meta?.artist ?? "Unknown Artist",
+                        album: meta?.album ?? "Unknown Album",
+                        fileExtension: URL(fileURLWithPath: filename).pathExtension
+                    )
+                }
+                .sorted {
+                    if $0.artist == $1.artist {
+                        return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+                    }
+                    return $0.artist.localizedCaseInsensitiveCompare($1.artist) == .orderedAscending
+                }
+
+            Logger.shared.log("[Export] Found \(songs.count) exportable songs")
+            completion(songs)
+        }
+    }
+
+    func exportSongs(_ songs: [ExportableSongInfo], destinationFolder: URL, completion: @escaping (Bool, String, [URL]) -> Void) {
+        guard !songs.isEmpty else {
+            completion(false, "No songs selected.", [])
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fileManager = FileManager.default
+            let exportDirectory = destinationFolder
+            let didAccessScope = exportDirectory.startAccessingSecurityScopedResource()
+            defer {
+                if didAccessScope {
+                    exportDirectory.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            do {
+                if !fileManager.fileExists(atPath: exportDirectory.path) {
+                    try fileManager.createDirectory(at: exportDirectory, withIntermediateDirectories: true)
+                }
+            } catch {
+                Logger.shared.log("[Export] Failed to create export folder: \(error)")
+                completion(false, "Could not access selected folder.", [])
+                return
+            }
+
+            let musicDir = self.resolvePrimaryMusicDirectory()
+            var exportedURLs: [URL] = []
+            var usedNames = Set<String>()
+            var failedCount = 0
+
+            func destinationURL(for song: ExportableSongInfo) -> URL {
+                let ext = song.fileExtension.isEmpty ? "mp3" : song.fileExtension
+                let baseName = Self.sanitizedExportFilenameBase("\(song.artist) - \(song.title)")
+                var candidate = "\(baseName).\(ext)"
+                var suffix = 1
+                while usedNames.contains(candidate) {
+                    candidate = "\(baseName)-\(suffix).\(ext)"
+                    suffix += 1
+                }
+                usedNames.insert(candidate)
+                return exportDirectory.appendingPathComponent(candidate)
+            }
+
+            func exportNext(_ index: Int) {
+                guard index < songs.count else {
+                    let success = !exportedURLs.isEmpty
+                    let message: String
+                    if success {
+                        message = failedCount == 0
+                            ? "Exported \(exportedURLs.count) song(s)."
+                            : "Exported \(exportedURLs.count) song(s), \(failedCount) failed."
+                    } else {
+                        message = "No songs were exported."
+                    }
+                    completion(success, message, exportedURLs)
+                    return
+                }
+
+                let song = songs[index]
+                let localURL = destinationURL(for: song)
+                if fileManager.fileExists(atPath: localURL.path) {
+                    try? fileManager.removeItem(at: localURL)
+                }
+
+                let remotePath = "\(musicDir)/\(song.remoteFilename)"
+                self.downloadFileFromDevice(remotePath: remotePath, localURL: localURL) { success in
+                    if success {
+                        exportedURLs.append(localURL)
+                    } else {
+                        failedCount += 1
+                        Logger.shared.log("[Export] Failed to export \(song.remoteFilename)")
+                    }
+                    exportNext(index + 1)
+                }
+            }
+
+            exportNext(0)
         }
     }
     
@@ -1671,7 +2472,7 @@ class DeviceManager: ObservableObject {
     private func cleanUpOrphanedFiles(validFilenames: Set<String>, musicDir: String, completion: @escaping (Int) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             var afc: AfcClientHandle?
-            afc_client_connect(self.provider, &afc)
+            self.connectAfcClient(&afc)
             
             guard afc != nil else {
                 Logger.shared.log("[DeviceManager] GC: Failed to connect AFC")
@@ -1723,6 +2524,340 @@ class DeviceManager: ObservableObject {
             }
         }
     }
+
+    func repairIOS26ArtworkColors(progress: @escaping (String) -> Void, completion: @escaping (Bool, String) -> Void) {
+        guard supportsIOS26ArtworkRepair else {
+            completion(false, "This repair is only needed on iOS 26.4 or newer.")
+            return
+        }
+
+        guard hasValidExpectedPairingFile else {
+            completion(false, "Import your RP Pairing File first.")
+            return
+        }
+
+        let startRepair = {
+            self.runIOS26ArtworkRepair(progress: progress, completion: completion)
+        }
+
+        if heartbeatReady && hasActiveTransport {
+            startRepair()
+        } else {
+            startHeartbeat { connected in
+                guard connected else {
+                    completion(false, "Could not connect to the device.")
+                    return
+                }
+                startRepair()
+            }
+        }
+    }
+
+    private func runIOS26ArtworkRepair(progress: @escaping (String) -> Void, completion: @escaping (Bool, String) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            if self.killMusicBeforeInjectEnabled {
+                let killed = self.terminateMusicAppIfRunning()
+                Logger.shared.log("[ArtworkRepair] Music pre-kill \(killed ? "completed" : "skipped/failed")")
+            }
+
+            progress("Downloading MediaLibrary...")
+
+            let semDb = DispatchSemaphore(value: 0)
+            var dbData: Data?
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { data in
+                dbData = data
+                semDb.signal()
+            }
+            semDb.wait()
+
+            guard let dbData, dbData.count > 10000 else {
+                completion(false, "MediaLibrary.sqlitedb unavailable.")
+                return
+            }
+
+            let semWal = DispatchSemaphore(value: 0)
+            var walData: Data?
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal") { data in
+                walData = data
+                semWal.signal()
+            }
+            semWal.wait()
+
+            let semShm = DispatchSemaphore(value: 0)
+            var shmData: Data?
+            self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm") { data in
+                shmData = data
+                semShm.signal()
+            }
+            semShm.wait()
+
+            let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("artwork_repair_\(UUID().uuidString)", isDirectory: true)
+            let dbURL = tempDir.appendingPathComponent("MediaLibrary.sqlitedb")
+
+            do {
+                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+                try dbData.write(to: dbURL)
+                if let walData {
+                    try walData.write(to: tempDir.appendingPathComponent("MediaLibrary.sqlitedb-wal"))
+                }
+                if let shmData {
+                    try shmData.write(to: tempDir.appendingPathComponent("MediaLibrary.sqlitedb-shm"))
+                }
+            } catch {
+                Logger.shared.log("[ArtworkRepair] Staging failed: \(error)")
+                completion(false, "Could not stage the database.")
+                return
+            }
+
+            var db: OpaquePointer?
+            guard sqlite3_open(dbURL.path, &db) == SQLITE_OK else {
+                try? FileManager.default.removeItem(at: tempDir)
+                completion(false, "Could not open the database.")
+                return
+            }
+
+            _ = self.sqliteExec(db, "PRAGMA wal_checkpoint(TRUNCATE)")
+            _ = self.sqliteExec(db, "PRAGMA journal_mode=DELETE")
+            let candidates = self.ios26ArtworkRepairCandidates(db: db)
+            sqlite3_close(db)
+
+            guard !candidates.isEmpty else {
+                try? FileManager.default.removeItem(at: tempDir)
+                completion(false, "No Apple Music matched artwork found.")
+                return
+            }
+
+            Logger.shared.log("[ArtworkRepair] Found \(candidates.count) artwork candidates")
+
+            Task { @MainActor in
+                var repairs: [(ArtworkRepairCandidate, String)] = []
+                var colorCache: [Int64: String] = [:]
+
+                for (index, candidate) in candidates.enumerated() {
+                    progress("Fetching artwork colors \(index + 1)/\(candidates.count)...")
+
+                    if let cached = colorCache[candidate.storeItemId] {
+                        repairs.append((candidate, cached))
+                        continue
+                    }
+
+                    guard let song = await AppleMusicAPI.shared.fetchSong(id: String(candidate.storeItemId)),
+                          let colors = song.attributes.artwork?.colors else {
+                        Logger.shared.log("[ArtworkRepair] No Apple colors for store_item_id=\(candidate.storeItemId)")
+                        continue
+                    }
+
+                    let colorAnalysis = MediaLibraryBuilder.colorAnalysisJSON(for: colors)
+                    colorCache[candidate.storeItemId] = colorAnalysis
+                    repairs.append((candidate, colorAnalysis))
+                }
+
+                guard !repairs.isEmpty else {
+                    try? FileManager.default.removeItem(at: tempDir)
+                    completion(false, "No artwork colors were available from Apple Music.")
+                    return
+                }
+
+                self.finishIOS26ArtworkRepair(
+                    dbURL: dbURL,
+                    tempDir: tempDir,
+                    repairs: repairs,
+                    progress: progress,
+                    completion: completion
+                )
+            }
+        }
+    }
+
+    private func finishIOS26ArtworkRepair(
+        dbURL: URL,
+        tempDir: URL,
+        repairs: [(ArtworkRepairCandidate, String)],
+        progress: @escaping (String) -> Void,
+        completion: @escaping (Bool, String) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            progress("Updating artwork database...")
+
+            var repairDb: OpaquePointer?
+            guard sqlite3_open(dbURL.path, &repairDb) == SQLITE_OK else {
+                try? FileManager.default.removeItem(at: tempDir)
+                completion(false, "Could not reopen the database.")
+                return
+            }
+
+            let repairedCount = self.applyIOS26ArtworkRepairs(db: repairDb, repairs: repairs)
+            _ = self.sqliteExec(repairDb, "PRAGMA wal_checkpoint(TRUNCATE)")
+            _ = self.sqliteExec(repairDb, "PRAGMA journal_mode=DELETE")
+            sqlite3_close(repairDb)
+
+            guard repairedCount > 0 else {
+                try? FileManager.default.removeItem(at: tempDir)
+                completion(false, "Artwork database update failed.")
+                return
+            }
+
+            progress("Uploading repaired database...")
+
+            let tempDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb.temp"
+            let finalDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+            let shmPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm"
+            let walPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal"
+
+            let semUpload = DispatchSemaphore(value: 0)
+            var uploaded = false
+            self.uploadFileToDevice(localURL: dbURL, remotePath: tempDBPath) { ok in
+                uploaded = ok
+                semUpload.signal()
+            }
+            semUpload.wait()
+
+            guard uploaded else {
+                try? FileManager.default.removeItem(at: tempDir)
+                completion(false, "Could not upload the repaired database.")
+                return
+            }
+
+            var afc: AfcClientHandle?
+            self.connectAfcClient(&afc)
+            guard let afc else {
+                try? FileManager.default.removeItem(at: tempDir)
+                completion(false, "AFC unavailable for database swap.")
+                return
+            }
+
+            _ = afc_remove_path(afc, shmPath)
+            _ = afc_remove_path(afc, walPath)
+            _ = afc_remove_path(afc, finalDBPath)
+
+            let renameErr = afc_rename_path(afc, tempDBPath, finalDBPath)
+            if renameErr != nil {
+                _ = afc_remove_path(afc, tempDBPath)
+                afc_client_free(afc)
+                try? FileManager.default.removeItem(at: tempDir)
+                completion(false, "Could not swap the repaired database.")
+                return
+            }
+
+            afc_client_free(afc)
+            try? FileManager.default.removeItem(at: tempDir)
+
+            self.sendSyncFinishedNotification()
+            Logger.shared.log("[ArtworkRepair] Repaired \(repairedCount) artwork rows")
+            completion(true, "Fixed artwork for \(repairedCount) songs. Restart Music if it is still cached.")
+        }
+    }
+
+    private func ios26ArtworkRepairCandidates(db: OpaquePointer?) -> [ArtworkRepairCandidate] {
+        let sql = """
+        SELECT DISTINCT i.item_pid, i.album_pid, s.store_item_id, at.artwork_token, aw.relative_path
+        FROM item i
+        JOIN item_store s ON s.item_pid = i.item_pid
+        JOIN artwork_token at
+          ON at.entity_pid = i.item_pid
+         AND at.entity_type = 0
+         AND at.artwork_type = 1
+         AND at.artwork_source_type = 1
+        JOIN artwork aw
+          ON aw.artwork_token = at.artwork_token
+         AND aw.artwork_source_type = at.artwork_source_type
+         AND aw.artwork_variant_type = at.artwork_variant_type
+        WHERE s.store_item_id > 0
+          AND at.artwork_token != ''
+          AND aw.relative_path != ''
+        """
+
+        var stmt: OpaquePointer?
+        var candidates: [ArtworkRepairCandidate] = []
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            return candidates
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let tokenPtr = sqlite3_column_text(stmt, 3),
+                  let pathPtr = sqlite3_column_text(stmt, 4) else {
+                continue
+            }
+
+            candidates.append(ArtworkRepairCandidate(
+                itemPid: sqlite3_column_int64(stmt, 0),
+                albumPid: sqlite3_column_int64(stmt, 1),
+                storeItemId: sqlite3_column_int64(stmt, 2),
+                artworkToken: String(cString: tokenPtr),
+                relativePath: String(cString: pathPtr)
+            ))
+        }
+
+        return candidates
+    }
+
+    private func applyIOS26ArtworkRepairs(db: OpaquePointer?, repairs: [(ArtworkRepairCandidate, String)]) -> Int {
+        _ = sqliteExec(db, "BEGIN IMMEDIATE TRANSACTION")
+        var repaired = 0
+
+        for (candidate, colorAnalysis) in repairs {
+            let token = candidate.artworkToken.replacingOccurrences(of: "'", with: "''")
+            let relativePath = candidate.relativePath.replacingOccurrences(of: "'", with: "''")
+            let escapedColorAnalysis = colorAnalysis.replacingOccurrences(of: "'", with: "''")
+
+            let ok1 = sqliteExec(db, """
+            UPDATE artwork
+            SET interest_data = '\(escapedColorAnalysis)'
+            WHERE artwork_token = '\(token)'
+              AND artwork_source_type IN (1, 300)
+            """)
+
+            let ok2 = sqliteExec(db, """
+            INSERT OR REPLACE INTO artwork (
+                artwork_token, artwork_source_type, relative_path, artwork_type, interest_data, artwork_variant_type
+            ) VALUES (
+                '\(token)', 300, '\(relativePath)', 6, '\(escapedColorAnalysis)', 0
+            )
+            """)
+
+            let ok3 = sqliteExec(db, """
+            INSERT OR REPLACE INTO artwork_token (
+                artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
+            ) VALUES (
+                '\(token)', 300, 1, \(candidate.itemPid), 0, 0
+            )
+            """)
+
+            let ok4 = sqliteExec(db, """
+            INSERT OR REPLACE INTO best_artwork_token (
+                entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token,
+                fetchable_artwork_source_type, artwork_variant_type
+            ) VALUES (
+                \(candidate.itemPid), 0, 1, '\(token)', '', 0, 0
+            )
+            """)
+
+            let ok5 = sqliteExec(db, """
+            INSERT OR REPLACE INTO artwork_token (
+                artwork_token, artwork_source_type, artwork_type, entity_pid, entity_type, artwork_variant_type
+            ) VALUES (
+                '\(token)', 300, 6, \(candidate.albumPid), 4, 0
+            )
+            """)
+
+            let ok6 = sqliteExec(db, """
+            INSERT OR REPLACE INTO best_artwork_token (
+                entity_pid, entity_type, artwork_type, available_artwork_token, fetchable_artwork_token,
+                fetchable_artwork_source_type, artwork_variant_type
+            ) VALUES (
+                \(candidate.albumPid), 4, 6, '\(token)', '', 0, 0
+            )
+            """)
+
+            if ok1 && ok2 && ok3 && ok4 && ok5 && ok6 {
+                repaired += 1
+            }
+        }
+
+        _ = sqliteExec(db, "COMMIT")
+        return repaired
+    }
     
     
     func downloadFileFromDevice(remotePath: String, completion: @escaping (Data?) -> Void) {
@@ -1732,7 +2867,7 @@ class DeviceManager: ObservableObject {
             var afc: AfcClientHandle?
             var file: AfcFileHandle?
             
-            afc_client_connect(self.provider, &afc)
+            self.connectAfcClient(&afc)
             
             guard afc != nil else {
                 Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for download")
@@ -1779,72 +2914,87 @@ class DeviceManager: ObservableObject {
         
         DispatchQueue.global(qos: .userInitiated).async {
             var afc: AfcClientHandle?
-            var file: AfcFileHandle?
             
-            let needsSecurityScope = localURL.startAccessingSecurityScopedResource()
-            defer {
-                if needsSecurityScope {
-                    localURL.stopAccessingSecurityScopedResource()
-                }
-            }
-            
-            afc_client_connect(self.provider, &afc)
+            self.connectAfcClient(&afc)
             
             guard afc != nil else {
                 Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for upload")
                 completion(false)
                 return
             }
-            
-            
-            let parentDir = (remotePath as NSString).deletingLastPathComponent
-            afc_make_directory(afc, parentDir)
+            defer { afc_client_free(afc) }
 
-            afc_remove_path(afc, remotePath)
-            
-            afc_file_open(afc, remotePath, AfcWrOnly, &file)
-            
-            guard file != nil else {
-                Logger.shared.log("[DeviceManager] ERROR: Could not open remote file: \(remotePath)")
-                afc_client_free(afc)
-                completion(false)
-                return
-            }
-            
-            
-            if let data = try? Data(contentsOf: localURL) {
-                
-                data.withUnsafeBytes { buffer in
-                    if let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                        afc_file_write(file, base, data.count)
-                    }
-                }
-                
-                
-                afc_file_close(file)
-                
-                
-                var checkFile: AfcFileHandle?
-                let ret = afc_file_open(afc, remotePath, AfcRdOnly, &checkFile)
-                if ret == nil { 
-                    if checkFile != nil {
-                        afc_file_close(checkFile)
-                    }
-                    afc_client_free(afc)
-                    completion(true)
-                } else {
-                    Logger.shared.log("[DeviceManager] ERROR: Verification failed for \(remotePath)")
-                    afc_client_free(afc)
-                    completion(false)
-                }
-            } else {
-                Logger.shared.log("[DeviceManager] ERROR: Could not read file data")
-                afc_file_close(file)
-                afc_client_free(afc)
-                completion(false)
-                return
+            completion(self.uploadFileToDevice(localURL: localURL, remotePath: remotePath, afc: afc))
+        }
+    }
+
+    private func uploadFileToDevice(localURL: URL, remotePath: String, afc: AfcClientHandle?, verify: Bool = true) -> Bool {
+        let needsSecurityScope = localURL.startAccessingSecurityScopedResource()
+        defer {
+            if needsSecurityScope {
+                localURL.stopAccessingSecurityScopedResource()
             }
         }
+
+        guard let data = try? Data(contentsOf: localURL) else {
+            Logger.shared.log("[DeviceManager] ERROR: Could not read file data")
+            return false
+        }
+
+        return uploadDataToDevice(data, remotePath: remotePath, afc: afc, verify: verify)
+    }
+
+    private func uploadDataToDevice(_ data: Data, remotePath: String, afc: AfcClientHandle?, verify: Bool = true) -> Bool {
+        var file: AfcFileHandle?
+
+        guard afc != nil else {
+            Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for upload")
+            return false
+        }
+
+        let parentDir = (remotePath as NSString).deletingLastPathComponent
+        afc_make_directory(afc, parentDir)
+        afc_remove_path(afc, remotePath)
+        afc_file_open(afc, remotePath, AfcWrOnly, &file)
+
+        guard file != nil else {
+            Logger.shared.log("[DeviceManager] ERROR: Could not open remote file: \(remotePath)")
+            return false
+        }
+
+        guard !data.isEmpty else {
+            afc_file_close(file)
+            Logger.shared.log("[DeviceManager] ERROR: Refusing to upload empty file: \(remotePath)")
+            return false
+        }
+
+        let writeErr: IdeviceErrorCode = data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+            guard let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return nil
+            }
+            return afc_file_write(file, base, data.count)
+        }
+
+        afc_file_close(file)
+
+        guard writeErr == nil else {
+            Logger.shared.log("[DeviceManager] ERROR: Failed to write remote file: \(remotePath)")
+            return false
+        }
+
+        guard verify else { return true }
+
+        var checkFile: AfcFileHandle?
+        let ret = afc_file_open(afc, remotePath, AfcRdOnly, &checkFile)
+        if ret == nil {
+            if checkFile != nil {
+                afc_file_close(checkFile)
+            }
+            return true
+        }
+
+        Logger.shared.log("[DeviceManager] ERROR: Verification failed for \(remotePath)")
+        return false
     }
     
     
@@ -1854,7 +3004,7 @@ class DeviceManager: ObservableObject {
         
         DispatchQueue.global(qos: .userInitiated).async {
             var afc: AfcClientHandle?
-            afc_client_connect(self.provider, &afc)
+            self.connectAfcClient(&afc)
             
             guard afc != nil else {
                 Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for listFiles")
@@ -1989,13 +3139,14 @@ class DeviceManager: ObservableObject {
             progress("Setting up directories...")
             Logger.shared.log("[DeviceManager] Step 2: Setting up directories")
             var afc: AfcClientHandle?
-            afc_client_connect(self.provider, &afc)
+            self.connectAfcClient(&afc)
             
             guard afc != nil else {
                 Logger.shared.log("[DeviceManager] ERROR: AFC client is nil")
                 DispatchQueue.main.async { completion(false) }
                 return
             }
+            defer { afc_client_free(afc) }
             
             
             
@@ -2009,10 +3160,7 @@ class DeviceManager: ObservableObject {
             afc_make_directory(afc, "/iTunes_Control/iTunes/Artwork/Caches")
             afc_make_directory(afc, "/iTunes_Control/Artwork")
             Logger.shared.log("[DeviceManager] Step 2: Directories created")
-            
-            afc_client_free(afc)
-            
-            
+
             var dbURL: URL
             var existingFiles = Set<String>()
             var artworkInfo: [MediaLibraryBuilder.ArtworkInfo] = []
@@ -2076,18 +3224,9 @@ class DeviceManager: ObservableObject {
                 }
                 
                 progress("Uploading \(index + 1)/\(validSongs.count): \(song.title)")
-                
-                
-                let semaphore = DispatchSemaphore(value: 0)
-                var uploadSuccess = false
-                
+
                 let remotePath = "\(musicDir)/\(song.remoteFilename)"
-                self.uploadFileToDevice(localURL: song.localURL, remotePath: remotePath) { success in
-                    uploadSuccess = success
-                    semaphore.signal()
-                }
-                
-                semaphore.wait()
+                let uploadSuccess = self.uploadFileToDevice(localURL: song.localURL, remotePath: remotePath, afc: afc, verify: false)
                 
                 if !uploadSuccess {
                     Logger.shared.log("[DeviceManager] ERROR: Failed to upload \(song.title)")
@@ -2105,36 +3244,19 @@ class DeviceManager: ObservableObject {
                     
                     let pathComponents = artworkRelativePath.components(separatedBy: "/")
                     let folderName = pathComponents.count >= 1 ? pathComponents[0] : "00"
-                    let fileName = pathComponents.count >= 2 ? pathComponents[1] : "unknown"
-                    
-                    let artworkDir = "/iTunes_Control/iTunes/Artwork/Originals/\(folderName)"
+	                    let artworkDir = "/iTunes_Control/iTunes/Artwork/Originals/\(folderName)"
                     let artworkPath = "/iTunes_Control/iTunes/Artwork/Originals/\(artworkRelativePath)"
                     
                     Logger.shared.log("[DeviceManager] Uploading artwork for: \(song.title) -> \(artworkPath)")
-                    
-                    
-                    var afcArt: AfcClientHandle?
-                    afc_client_connect(self.provider, &afcArt)
-                    if afcArt != nil {
-                        afc_make_directory(afcArt, "/iTunes_Control/iTunes/Artwork")
-                        afc_make_directory(afcArt, "/iTunes_Control/iTunes/Artwork/Originals")
-                        afc_make_directory(afcArt, artworkDir)
-                        afc_client_free(afcArt)
-                    }
-                    
-                    
-                    let tempArtwork = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-                    try? artworkData.write(to: tempArtwork)
-                    
-                    
-                    let artworkSem = DispatchSemaphore(value: 0)
-                    self.uploadFileToDevice(localURL: tempArtwork, remotePath: artworkPath) { _ in
-                        artworkSem.signal()
-                    }
-                    artworkSem.wait()
-                    
-                    try? FileManager.default.removeItem(at: tempArtwork)
-                    Logger.shared.log("[DeviceManager] Artwork uploaded to: \(artworkPath)")
+                    afc_make_directory(afc, "/iTunes_Control/iTunes/Artwork")
+                    afc_make_directory(afc, "/iTunes_Control/iTunes/Artwork/Originals")
+                    afc_make_directory(afc, artworkDir)
+
+	                    if self.uploadDataToDevice(artworkData, remotePath: artworkPath, afc: afc, verify: false) {
+	                        Logger.shared.log("[DeviceManager] Artwork uploaded to: \(artworkPath)")
+	                    } else {
+	                        Logger.shared.log("[DeviceManager] WARNING: Artwork upload failed for: \(song.title)")
+	                    }
                 }
             }
             
@@ -2153,56 +3275,30 @@ class DeviceManager: ObservableObject {
             let finalDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
             let shmPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm"
             let walPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal"
-            
-            
-            let semUploadDB = DispatchSemaphore(value: 0)
-            var dbUploadSuccess = false
-            self.uploadFileToDevice(localURL: dbURL, remotePath: tempDBPath) { success in
-                dbUploadSuccess = success
-                semUploadDB.signal()
-            }
-            semUploadDB.wait()
+            let dbUploadSuccess = self.uploadFileToDevice(localURL: dbURL, remotePath: tempDBPath, afc: afc)
             
             if !dbUploadSuccess {
                 Logger.shared.log("[DeviceManager] ERROR: Failed to upload temp database")
                 DispatchQueue.main.async { completion(false) }
                 return
             }
-            
-            
-            var afcSwap: AfcClientHandle?
-            afc_client_connect(self.provider, &afcSwap)
-            
-            guard afcSwap != nil else {
-                Logger.shared.log("[DeviceManager] ERROR: Failed to connect AFC for atomic swap")
-                DispatchQueue.main.async { completion(false) }
-                return
-            }
-            
-            
-            afc_remove_path(afcSwap, shmPath)
-            afc_remove_path(afcSwap, walPath)
-            
-            
-            afc_remove_path(afcSwap, finalDBPath)
-            
-            
-            let renameErr = afc_rename_path(afcSwap, tempDBPath, finalDBPath)
+
+            afc_remove_path(afc, shmPath)
+            afc_remove_path(afc, walPath)
+            afc_remove_path(afc, finalDBPath)
+
+            let renameErr = afc_rename_path(afc, tempDBPath, finalDBPath)
             
             if renameErr != nil {
                 Logger.shared.log("[DeviceManager] ERROR: Failed to rename database (Error: \(renameErr!))")
                  
-                 afc_remove_path(afcSwap, tempDBPath)
-                 afc_client_free(afcSwap)
+                 afc_remove_path(afc, tempDBPath)
                  DispatchQueue.main.async { completion(false) }
                  return
             }
             
             Logger.shared.log("[DeviceManager] Database swapped successfully.")
-            afc_client_free(afcSwap)
-            
-            
-            
+
             progress("Finalizing...")
             Logger.shared.log("[DeviceManager] Step 6: Garbage Collection")
             
@@ -2311,7 +3407,7 @@ class DeviceManager: ObservableObject {
             
             
             var afc: AfcClientHandle?
-            afc_client_connect(self.provider, &afc)
+            self.connectAfcClient(&afc)
             if afc != nil {
                 
                 
@@ -2458,7 +3554,7 @@ class DeviceManager: ObservableObject {
             
             
             var afcSwap: AfcClientHandle?
-            afc_client_connect(self.provider, &afcSwap)
+            self.connectAfcClient(&afcSwap)
             
             guard afcSwap != nil else {
                 Logger.shared.log("[DeviceManager] ERROR: Failed to connect AFC for atomic swap")
@@ -2598,7 +3694,7 @@ class DeviceManager: ObservableObject {
 
             // ── Step 2: Ensure ringtone directories exist ──────────────
             var afcDir: AfcClientHandle?
-            afc_client_connect(self.provider, &afcDir)
+            self.connectAfcClient(&afcDir)
             if afcDir != nil {
                 afc_make_directory(afcDir, primaryRoot)
                 afc_make_directory(afcDir, "\(primaryRoot)/Sync")
@@ -2762,7 +3858,7 @@ class DeviceManager: ObservableObject {
                     
                     if uploadOK {
                         var afcSwap: AfcClientHandle?
-                        afc_client_connect(self.provider, &afcSwap)
+                        self.connectAfcClient(&afcSwap)
                         if let afcSwap {
                             _ = afc_remove_path(afcSwap, shmPath)
                             _ = afc_remove_path(afcSwap, walPath)

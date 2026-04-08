@@ -5,6 +5,13 @@ import CryptoKit
 import CommonCrypto
 
 
+struct AppleMusicArtworkColors {
+    var backgroundColor: String
+    var primaryTextColor: String
+    var secondaryTextColor: String
+    var tertiaryTextColor: String
+}
+
 struct SongMetadata: Identifiable {
     let id = UUID()
     
@@ -20,6 +27,7 @@ struct SongMetadata: Identifiable {
     var remoteFilename: String
     var artworkData: Data?
     var artworkPreviewData: Data? = nil
+    var appleMusicArtworkColors: AppleMusicArtworkColors? = nil
     
     var trackNumber: Int?
     var trackCount: Int?
@@ -46,7 +54,7 @@ struct SongMetadata: Identifiable {
     }
     
     
-    static func generateRemoteFilename(withExtension ext: String? = nil) -> String {
+    nonisolated static func generateRemoteFilename(withExtension ext: String? = nil) -> String {
         let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         let randomName = String((0..<12).map { _ in letters.randomElement()! })
         let e = (ext?.isEmpty == false) ? ext!.lowercased() : "mp3"
@@ -99,8 +107,7 @@ struct SongMetadata: Identifiable {
             return nil
         }
     }
-    
-    
+
     static func generateGroupingKey(_ text: String) -> Data {
         guard !text.isEmpty else { return Data() }
         
@@ -634,7 +641,7 @@ struct SongMetadata: Identifiable {
         guard let url = URL(string: urlString) else { return nil }
         
         var request = URLRequest(url: url)
-        request.setValue("ByeTunes/2.0 (https://github.com/EduAlexxis/ByeTunes)", forHTTPHeaderField: "User-Agent")
+        request.setValue("ByeTunes/2.1 (https://github.com/EduAlexxis/ByeTunes)", forHTTPHeaderField: "User-Agent")
         
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -1124,10 +1131,7 @@ struct SongMetadata: Identifiable {
 
     private static func md5Hex(_ string: String) -> String {
         let data = Data(string.utf8)
-        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
-        data.withUnsafeBytes { buffer in
-            _ = CC_MD5(buffer.baseAddress, CC_LONG(data.count), &digest)
-        }
+        let digest = Insecure.MD5.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -1265,7 +1269,7 @@ extension SongMetadata {
         guard let url = URL(string: "https://lrclib.net/api/search?q=\(encodedQuery)") else { return [] }
         
         var request = URLRequest(url: url)
-        request.setValue("ByeTunes/2.0 (https://github.com/EduAlexxis/ByeTunes)", forHTTPHeaderField: "User-Agent")
+        request.setValue("ByeTunes/2.1 (https://github.com/EduAlexxis/ByeTunes)", forHTTPHeaderField: "User-Agent")
         
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -1562,6 +1566,7 @@ extension SongMetadata {
                 enrichedSong.artworkData = data
             }
         }
+        enrichedSong.appleMusicArtworkColors = amsMatch.attributes.artwork?.colors
         
         enrichedSong.genre = canonicalGenre(enrichedSong.genre)
         enrichedSong.richAppleMetadataFetched = true
@@ -1877,7 +1882,7 @@ actor AppleMusicAPI {
     func getToken() async -> String? {
         if let token = cachedToken { return token }
         
-        Logger.shared.log("[AppleMusicAPI] Fetching token via URLSession...")
+        await Logger.shared.log("[AppleMusicAPI] Fetching token via URLSession...")
         
         guard let pageUrl = URL(string: "https://music.apple.com/us/browse") else { return nil }
         var pageRequest = URLRequest(url: pageUrl)
@@ -1886,7 +1891,7 @@ actor AppleMusicAPI {
         do {
             let (htmlData, _) = try await URLSession.shared.data(for: pageRequest)
             guard let html = String(data: htmlData, encoding: .utf8) else {
-                Logger.shared.log("[AppleMusicAPI] ⚠️ Failed to decode HTML")
+                await Logger.shared.log("[AppleMusicAPI] ⚠️ Failed to decode HTML")
                 return nil
             }
             
@@ -1894,25 +1899,25 @@ actor AppleMusicAPI {
             guard let scriptRegex = try? NSRegularExpression(pattern: scriptPattern),
                   let scriptMatch = scriptRegex.firstMatch(in: html, range: NSRange(html.startIndex..<html.endIndex, in: html)),
                   let scriptRange = Range(scriptMatch.range(at: 1), in: html) else {
-                Logger.shared.log("[AppleMusicAPI] ⚠️ No index JS bundle found in HTML")
+                await Logger.shared.log("[AppleMusicAPI] ⚠️ No index JS bundle found in HTML")
                 return nil
             }
             
             let jsPath = String(html[scriptRange])
             let jsUrlString = jsPath.hasPrefix("http") ? jsPath : "https://music.apple.com\(jsPath)"
             guard let jsUrl = URL(string: jsUrlString) else {
-                Logger.shared.log("[AppleMusicAPI] ⚠️ Invalid JS URL: \(jsUrlString)")
+                await Logger.shared.log("[AppleMusicAPI] ⚠️ Invalid JS URL: \(jsUrlString)")
                 return nil
             }
             
-            Logger.shared.log("[AppleMusicAPI] Found JS bundle: \(jsPath)")
+            await Logger.shared.log("[AppleMusicAPI] Found JS bundle: \(jsPath)")
             
             var jsRequest = URLRequest(url: jsUrl)
             jsRequest.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
             
             let (jsData, _) = try await URLSession.shared.data(for: jsRequest)
             guard let jsContent = String(data: jsData, encoding: .utf8) else {
-                Logger.shared.log("[AppleMusicAPI] ⚠️ Failed to decode JS bundle")
+                await Logger.shared.log("[AppleMusicAPI] ⚠️ Failed to decode JS bundle")
                 return nil
             }
             
@@ -1920,17 +1925,17 @@ actor AppleMusicAPI {
             guard let tokenRegex = try? NSRegularExpression(pattern: tokenPattern),
                   let tokenMatch = tokenRegex.firstMatch(in: jsContent, range: NSRange(jsContent.startIndex..<jsContent.endIndex, in: jsContent)),
                   let tokenRange = Range(tokenMatch.range, in: jsContent) else {
-                Logger.shared.log("[AppleMusicAPI] ⚠️ No token found in JS bundle")
+                await Logger.shared.log("[AppleMusicAPI] ⚠️ No token found in JS bundle")
                 return nil
             }
             
             let token = String(jsContent[tokenRange])
             self.cachedToken = token
-            Logger.shared.log("[AppleMusicAPI] ✅ Token fetched successfully via URLSession")
+            await Logger.shared.log("[AppleMusicAPI] ✅ Token fetched successfully via URLSession")
             return token
             
         } catch {
-            Logger.shared.log("[AppleMusicAPI] ⚠️ Token fetch failed: \(error)")
+            await Logger.shared.log("[AppleMusicAPI] ⚠️ Token fetch failed: \(error)")
             return nil
         }
     }
@@ -1957,6 +1962,7 @@ actor AppleMusicAPI {
         let name: String
         let artistName: String
         let albumName: String?
+        let url: String?
         let genreNames: [String]?
         let isrc: String?
         let contentRating: String?
@@ -1971,6 +1977,23 @@ actor AppleMusicAPI {
         let width: Int
         let height: Int
         let url: String
+        let bgColor: String?
+        let textColor1: String?
+        let textColor2: String?
+        let textColor3: String?
+        let textColor4: String?
+        
+        var colors: AppleMusicArtworkColors? {
+            guard let bgColor else {
+                return nil
+            }
+            return AppleMusicArtworkColors(
+                backgroundColor: bgColor,
+                primaryTextColor: textColor1 ?? "FFFFFF",
+                secondaryTextColor: textColor2 ?? textColor1 ?? "FFFFFF",
+                tertiaryTextColor: textColor3 ?? textColor2 ?? textColor1 ?? "CCCCCC"
+            )
+        }
         
         func artworkURL(width w: Int = 1000, height h: Int = 1000) -> URL? {
             let processed = url.replacingOccurrences(of: "{w}", with: "\(w)")
@@ -2007,6 +2030,10 @@ actor AppleMusicAPI {
         let copyright: String?
         let releaseDate: String?
     }
+
+    private struct AppleMusicDirectSongResponse: Codable {
+        let data: [AppleMusicSong]
+    }
     
     func searchSongs(query: String, limit: Int = 5) async -> [AppleMusicSong] {
         guard let token = await getToken() else { return [] }
@@ -2030,7 +2057,7 @@ actor AppleMusicAPI {
             let result = try JSONDecoder().decode(AppleMusicSearchResponse.self, from: data)
             return result.results.songs?.data ?? []
         } catch {
-            Logger.shared.log("[AppleMusicAPI] Search failed: \(error)")
+            await Logger.shared.log("[AppleMusicAPI] Search failed: \(error)")
             return []
         }
     }
@@ -2056,14 +2083,10 @@ actor AppleMusicAPI {
             let result = try JSONDecoder().decode(AppleMusicDirectSongResponse.self, from: data)
             return result.data.first
         } catch {
-            Logger.shared.log("[AppleMusicAPI] Direct song fetch failed: \(error)")
+            await Logger.shared.log("[AppleMusicAPI] Direct song fetch failed: \(error)")
             return nil
         }
     }
-}
-
-private struct AppleMusicDirectSongResponse: Codable {
-    let data: [AppleMusicAPI.AppleMusicSong]
 }
 
 extension SongMetadata {

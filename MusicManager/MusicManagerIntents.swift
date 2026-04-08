@@ -101,7 +101,7 @@ struct InjectRingtoneIntent: AppIntent {
             return .result(dialog: "Error saving ringtone file.")
         }
         
-        let ringtone = RingtoneMetadata.fromURL(tempURL)
+        let ringtone = await RingtoneMetadata.fromURL(tempURL)
         
         
         let song = SongMetadata(

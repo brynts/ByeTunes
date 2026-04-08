@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct LogViewer: View {
     @ObservedObject var logger = Logger.shared
@@ -6,6 +7,7 @@ struct LogViewer: View {
     
     @State private var showingShareSheet = false
     @State private var logURL: URL?
+    @State private var showCopiedBanner = false
     
     var body: some View {
         NavigationView {
@@ -35,6 +37,16 @@ struct LogViewer: View {
                         presentationMode.wrappedValue.dismiss()
                     }
                 }
+
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        UIPasteboard.general.string = logger.logs
+                        showCopiedBanner = true
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .disabled(logger.logs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
                 
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: {
@@ -50,6 +62,25 @@ struct LogViewer: View {
             .sheet(isPresented: $showingShareSheet) {
                 if let url = logURL {
                     LogShareSheet(activityItems: [url])
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if showCopiedBanner {
+                    Text("Logs copied")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.thinMaterial)
+                        .clipShape(Capsule())
+                        .padding(.bottom, 20)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: showCopiedBanner)
+            .onChange(of: showCopiedBanner) { copied in
+                guard copied else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    showCopiedBanner = false
                 }
             }
         }
