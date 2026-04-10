@@ -1,0 +1,75 @@
+name: Build
+
+on:
+  push:
+    branches: [ "build" ]
+  pull_request:
+    branches: [ "build" ]
+
+jobs:
+  build:
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Clone idevice repository
+        run: git clone --depth 1 https://github.com/jkcoxson/idevice.git
+
+      - name: Build libidevice_ffi
+        working-directory: idevice
+        run: |
+          export IPHONEOS_DEPLOYMENT_TARGET=18.0
+          cargo build --release --package idevice-ffi --target aarch64-apple-ios
+
+      - name: Copy build artifacts to MusicManager/
+        run: |
+          cp idevice/target/aarch64-apple-ios/release/libidevice_ffi.a MusicManager/
+          find idevice -name "idevice.h" -exec cp {} MusicManager/ \;
+
+      - name: Create Bridging-Header.h
+        run: |
+          cat > MusicManager/Bridging-Header.h << 'EOF'
+          #ifndef Bridging_Header_h
+          #define Bridging_Header_h
+
+          #import "idevice.h"
+
+          #endif /* Bridging_Header_h */
+          EOF
+
+      - name: Archive (no signing)
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          xcodebuild clean archive \
+            -project MusicManager.xcodeproj \
+            -scheme MusicManager \
+            -sdk iphoneos \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath ./build/MusicManager.xcarchive \
+            IPHONEOS_DEPLOYMENT_TARGET=18.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Create unsigned IPA (manual zip)
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          IPA_NAME="ByeTunes-${SHORT_SHA}.ipa"
+          mkdir -p Payload
+          cp -r ./build/MusicManager.xcarchive/Products/Applications/MusicManager.app Payload/
+          zip -r -y "./build/${IPA_NAME}" Payload
+          rm -rf Payload
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ByeTunes-unsigned
+          path: ./build/ByeTunes-*.ipa
+          if-no-files-found: error
